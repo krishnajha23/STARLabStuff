@@ -396,7 +396,9 @@ class GymEnv(object):
                         percentile=[],
                         get_full_dist=False,
                         terminate_at_done=True,
-                        seed=123):
+                        seed=123,
+                        record_video=False,
+                        video_path=None):
         print("Begin evalauting current policy!")
         self.set_seed(seed)
         task = self.env_id.split('-')[0]
@@ -406,6 +408,12 @@ class GymEnv(object):
         tracking_rewards = np.zeros(num_episodes)
         episodes = []
         total_score = 0.0
+        if record_video:
+            print("🎥 Video recording enabled")
+            all_episode_frames = []
+            all_actions = []
+            all_target_positions = []
+            all_target_velocities = []
         if task == 'pen':
             success_threshold = 10
             # success_threshold = 20 if task == 'pen' else 25
@@ -413,6 +421,11 @@ class GymEnv(object):
                 episode_data = {
                     'goal_achieved': []
                 }
+                if record_video:
+                    episode_frames = []
+                    episode_actions = []
+                    episode_target_positions = []
+                    episode_target_velocities = []
                 self.reset()
                 self.set_env_state(Eval_data[ep]['init_states'])
                 init_hand_state = Eval_data[ep]['handpos']
@@ -470,6 +483,19 @@ class GymEnv(object):
                 for i in range(history_state + 1):
                     prev_actions[i] = hand_states_traj[0]
                 while t < task_horizon - 1 and obj_height > 0.15:  # early-terminate when the object falls off
+                    if record_video:
+                        try:
+                            # Try to render a frame
+                            frame = self.env.sim.render(width=640, height=480, mode='offscreen')
+                            episode_frames.append(frame)
+                        except AttributeError:
+                            # If sim doesn't exist, try alternative
+                            try:
+                                frame = self.env.env.sim.render(width=640, height=480, mode='offscreen')
+                                episode_frames.append(frame)
+                            except Exception as e:
+                                if t == 0:  # Only print once per episode
+                                    print(f"⚠️  Frame capture failed: {e}")
                     o = self.get_obs()
                     current_hand_state = o[:24]
                     current_objpos = o[24:27]
@@ -551,6 +577,9 @@ class GymEnv(object):
                     tracking_rewards[ep] += (gamma ** t) * tracking_reward  # only tracking rewards
                     t += 1    
                 # print("Task reward = %f, Tracking reward = %f, Success = %d" % (ep_returns[ep], tracking_rewards[ep], sum(episode_data['goal_achieved']) > success_threshold))
+                if record_video and len(episode_frames) > 0:
+                    all_episode_frames.append(episode_frames)
+                    print(f"  Episode {ep}: captured {len(episode_frames)} frames")
                 episodes.append(copy.deepcopy(episode_data))
                 total_score += ep_returns[ep]
                 # asd
@@ -563,6 +592,8 @@ class GymEnv(object):
                 episode_data = {
                     'goal_achieved': []
                 }
+                if record_video:
+                    episode_frames = []
                 self.reset()
                 self.set_env_state(Eval_data[ep]['init_states'])
                 init_hand_state = Eval_data[ep]['handpos']
@@ -635,6 +666,17 @@ class GymEnv(object):
                         elif policy.m == 27:
                             prev_actions[i] = hand_states_traj[0][3:30]
                 while t < task_horizon - 1 and obj_height > -0.05:  # what would be early-termination for relocation task?
+                    if record_video:
+                        try:
+                            frame = self.env.sim.render(width=640, height=480, mode='offscreen')
+                            episode_frames.append(frame)
+                        except AttributeError:
+                            try:
+                                frame = self.env.env.sim.render(width=640, height=480, mode='offscreen')
+                                episode_frames.append(frame)
+                            except Exception as e:
+                                if t == 0:
+                                    print(f"⚠️  Frame capture failed: {e}")
                     o = self.get_obs()
                     if not policy.freeze_base:
                         current_hand_state = o[:30]
@@ -795,15 +837,103 @@ class GymEnv(object):
                         else: # include rotation angles  
                             tracking_reward = Comp_tracking_reward_relocate_include_Rots(reference, obs, coeffcients)['total_reward']
                     tracking_rewards[ep] += (gamma ** t) * tracking_reward  # only tracking rewards
-                    t += 1   
-                episodes.append(copy.deepcopy(episode_data))  
+                    t += 1
+                if record_video and len(episode_frames) > 0:
+                    all_episode_frames.append(episode_frames)
+                    print(f"  Episode {ep}: captured {len(episode_frames)} frames")   
+                           if policy.m == 24:
+                                prev_states[i] = np.append(hand_states_traj[0][4:28], object_states_traj[0]) 
+                            elif policy.m == 25:
+                 episodes.append(copy.deepcopy(episode_data))  
                 total_score += ep_returns[ep]
             successful_episodes = list(filter(lambda episode: sum(episode['goal_achieved']) > success_threshold, episodes))
             print("Average score = %f" % (total_score / num_episodes))
-            print("Success rate = %f" % (len(successful_episodes) / len(episodes))) 
-        elif task == 'door':
+            print("Success rate = %f" % (len(successful_episodes) / len(episodes)))  
+        elif task == 'hammer':
             success_list_sim = []
             for ep in tqdm(range(num_episodes)):
+                if record_video:
+                    episode_frames = []
+                    episode_actions = []
+                    episode_target_positions = []
+                    episode_target_velocities = []
+                self.reset()
+                self.set_env_state(Eval_data[ep]['init_states'])
+                init_hand_state = Eval_data[ep]['handpos']
+                init_objpos = Eval_data[ep]['objpos']
+                init_objori = Eval_data[ep]['objorient']
+                init_objvel = Eval_data[ep]['objvel']
+                goal_nail = Eval_data[ep]['nail_goal']
+                hand_OriState = init_hand_state
+                obj_OriState = np.append(init_objpos, np.append(init_objori, np.append(init_objvel, goal_nail)))  # ori: represented in the transformed frame
+                num_hand = len(hand_OriState)
+                num_obj = len(obj_OriState)
+                hand_states_traj = np.zeros([task_horizon, num_hand])
+                object_states_traj = np.zeros([task_horizon, num_obj])
+                hand_states_traj[0, :] = hand_OriState
+                object_states_traj[0, :] = obj_OriState
+                z_t = Koopman_obser.z(hand_OriState, obj_OriState)  # initial states in lifted space
+                for t_ in range(task_horizon - 1):
+                    z_t_1_computed = np.dot(KODex, z_t)
+                    z_t = z_t_1_computed.copy()
+                    x_t_1_computed = np.append(z_t_1_computed[:num_hand], z_t_1_computed[2 * num_hand: 2 * num_hand + num_obj])  # retrieved robot & object states
+                    hand_OriState = x_t_1_computed[:num_hand]
+                    obj_pos = x_t_1_computed[num_hand: num_hand + 3] # tool pos
+                    obj_ori = x_t_1_computed[num_hand + 3: num_hand + 6] # tool ori
+                    obj_vel = x_t_1_computed[num_hand + 6: num_hand + 12]
+                    nail_pos = x_t_1_computed[num_hand + 12:]
+                    obj_OriState = np.append(obj_pos, np.append(obj_ori, np.append(obj_vel, nail_pos)))
+                    hand_states_traj[t_ + 1, :] = hand_OriState
+                    object_states_traj[t_ + 1, :] = obj_OriState
+                    if self.env.control_mode == 'PID':  # if Torque mode, we skil the visualization of PD controller.
+                        PID_controller.set_goal(hand_OriState)
+                        for _z in range(5): # control frequency: 500HZ / use this to output PD target
+                            # for relocation task, it we set a higher control frequency, we can expect a much better PD performance
+                            torque_action = PID_controller(self.get_env_state()['qpos'][:num_hand], self.get_env_state()['qvel'][:num_hand])
+                            next_o, r, done, goal_achieved = self.step(torque_action)    
+                # re-set the experiments, as we finish visualizing the reference motion of KODex
+                self.reset()
+                self.set_env_state(Eval_data[ep]['init_states'])
+                o = self.get_obs()
+                t, done = 0, False
+                # for the default history states, set them to be initial hand states
+                prev_states = dict()
+                if not policy.freeze_base:
+                    for i in range(history_state):
+                        if obj_dynamics:
+                            prev_states[i] = np.append(hand_states_traj[0], object_states_traj[0]) 
+                        else:
+                            prev_states[i] = hand_states_traj[0]
+                    prev_actions = dict()
+                    for i in range(history_state + 1):
+                        prev_actions[i] = hand_states_traj[0]
+                else:
+                    for i in range(history_state):
+                        if obj_dynamics:
+                            prev_states[i] = np.append(hand_states_traj[0][2:26], object_states_traj[0]) 
+                        else:
+                            prev_states[i] = hand_states_traj[0][2:26]
+                    prev_actions = dict()
+                    for i in range(history_state + 1):
+                        prev_actions[i] = hand_states_traj[0][2:26]
+                while t < task_horizon - 1:  # what would be early-termination for door task?
+                    if record_video:
+                        try:
+                            frame = self.env.sim.render(width=640, height=480, mode='offscreen')
+                            episode_frames.append(frame)
+                        except AttributeError:
+                            try:
+                                frame = self.env.env.sim.render(width=640, height=480, mode='offscreen')
+                                episode_frames.append(frame)
+                            except Exception as e:
+                                if t == 0:
+                                    print(f"⚠️  Frame capture failed: {e}")
+                    o = self.get_obs()
+                    if not policy.freeze_base:
+                        current_hand_state = self.get_env_state()['qpos'][:num_hand]
+                    else:for ep in tqdm(range(num_episodes)):
+                if record_video:
+                    episode_frames = []
                 self.reset()
                 self.set_env_state(Eval_data[ep]['init_states'])
                 init_hand_state = Eval_data[ep]['handpos']
@@ -883,6 +1013,17 @@ class GymEnv(object):
                         elif policy.m == 27:
                             prev_actions[i] = hand_states_traj[0][1:28]
                 while t < task_horizon - 1:  # what would be early-termination for door task?
+                    if record_video:
+                        try:
+                            frame = self.env.sim.render(width=640, height=480, mode='offscreen')
+                            episode_frames.append(frame)
+                        except AttributeError:
+                            try:
+                                frame = self.env.env.sim.render(width=640, height=480, mode='offscreen')
+                                episode_frames.append(frame)
+                            except Exception as e:
+                                if t == 0:
+                                    print(f"⚠️  Frame capture failed: {e}")
                     o = self.get_obs()
                     if not policy.freeze_base:
                         current_hand_state = self.get_env_state()['qpos'][:num_hand]
@@ -939,7 +1080,8 @@ class GymEnv(object):
                                             policy_input[future_index + (num_hand + num_obj) * t_: future_index + (num_hand + num_obj) * (t_ + 1)] = np.append(hand_states_traj[t + future_state[t_]][1:28], object_states_traj[t + future_state[t_]])
                         else:
                             policy_input = np.zeros((num_future_s + history_state + 1) * num_hand + (history_state + 1) * num_hand)
-                            prev_states[history_state] = hand_OriState # add the current states 
+                            prev_states[history_state] # Simple video recording mode
+
                             for i in range(history_state + 1):
                                 policy_input[i * (2 * num_hand): (i + 1) * (2 * num_hand)] = np.append(prev_actions[i], prev_states[i])
                             future_index = (history_state + 1) * (2 * num_hand)
@@ -970,7 +1112,6 @@ class GymEnv(object):
                                         elif policy.m == 27:
                                             policy_input[future_index + num_hand * t_:future_index + num_hand * (t_ + 1)] = hand_states_traj[t + future_state[t_]][1:28]
                     else: # no history information into policy inputs
-                        if obj_dynamics:  # if we use the object dynamics as part of policy input
                             policy_input = np.zeros((num_future_s + 1) * (num_hand + num_obj))
                             policy_input[:num_hand + num_obj] = np.append(hand_OriState, obj_OriState)
                             if not policy.freeze_base:
@@ -1090,78 +1231,14 @@ class GymEnv(object):
                     tracking_rewards[ep] += (gamma ** t) * tracking_reward  # only tracking rewards
                     t += 1   
                     current_hinge_pos = next_o[28:29] # door opening angle
+                if record_video and len(episode_frames) > 0:
+                    all_episode_frames.append(episode_frames)
+                    print(f"  Episode {ep}: captured {len(episode_frames)} frames")
                 if current_hinge_pos > 1.35:
                     success_list_sim.append(1)
                 total_score += ep_returns[ep]
             print("Average score = %f" % (total_score / num_episodes))
-            print("Success rate = %f" % (len(success_list_sim) / num_episodes)) 
-        elif task == 'hammer':
-            success_list_sim = []
-            for ep in tqdm(range(num_episodes)):
-                self.reset()
-                self.set_env_state(Eval_data[ep]['init_states'])
-                init_hand_state = Eval_data[ep]['handpos']
-                init_objpos = Eval_data[ep]['objpos']
-                init_objori = Eval_data[ep]['objorient']
-                init_objvel = Eval_data[ep]['objvel']
-                goal_nail = Eval_data[ep]['nail_goal']
-                hand_OriState = init_hand_state
-                obj_OriState = np.append(init_objpos, np.append(init_objori, np.append(init_objvel, goal_nail)))  # ori: represented in the transformed frame
-                num_hand = len(hand_OriState)
-                num_obj = len(obj_OriState)
-                hand_states_traj = np.zeros([task_horizon, num_hand])
-                object_states_traj = np.zeros([task_horizon, num_obj])
-                hand_states_traj[0, :] = hand_OriState
-                object_states_traj[0, :] = obj_OriState
-                z_t = Koopman_obser.z(hand_OriState, obj_OriState)  # initial states in lifted space
-                for t_ in range(task_horizon - 1):
-                    z_t_1_computed = np.dot(KODex, z_t)
-                    z_t = z_t_1_computed.copy()
-                    x_t_1_computed = np.append(z_t_1_computed[:num_hand], z_t_1_computed[2 * num_hand: 2 * num_hand + num_obj])  # retrieved robot & object states
-                    hand_OriState = x_t_1_computed[:num_hand]
-                    obj_pos = x_t_1_computed[num_hand: num_hand + 3] # tool pos
-                    obj_ori = x_t_1_computed[num_hand + 3: num_hand + 6] # tool ori
-                    obj_vel = x_t_1_computed[num_hand + 6: num_hand + 12]
-                    nail_pos = x_t_1_computed[num_hand + 12:]
-                    obj_OriState = np.append(obj_pos, np.append(obj_ori, np.append(obj_vel, nail_pos)))
-                    hand_states_traj[t_ + 1, :] = hand_OriState
-                    object_states_traj[t_ + 1, :] = obj_OriState
-                    if self.env.control_mode == 'PID':  # if Torque mode, we skil the visualization of PD controller.
-                        PID_controller.set_goal(hand_OriState)
-                        for _z in range(5): # control frequency: 500HZ / use this to output PD target
-                            # for relocation task, it we set a higher control frequency, we can expect a much better PD performance
-                            torque_action = PID_controller(self.get_env_state()['qpos'][:num_hand], self.get_env_state()['qvel'][:num_hand])
-                            next_o, r, done, goal_achieved = self.step(torque_action)    
-                # re-set the experiments, as we finish visualizing the reference motion of KODex
-                self.reset()
-                self.set_env_state(Eval_data[ep]['init_states'])
-                o = self.get_obs()
-                t, done = 0, False
-                # for the default history states, set them to be initial hand states
-                prev_states = dict()
-                if not policy.freeze_base:
-                    for i in range(history_state):
-                        if obj_dynamics:
-                            prev_states[i] = np.append(hand_states_traj[0], object_states_traj[0]) 
-                        else:
-                            prev_states[i] = hand_states_traj[0]
-                    prev_actions = dict()
-                    for i in range(history_state + 1):
-                        prev_actions[i] = hand_states_traj[0]
-                else:
-                    for i in range(history_state):
-                        if obj_dynamics:
-                            prev_states[i] = np.append(hand_states_traj[0][2:26], object_states_traj[0]) 
-                        else:
-                            prev_states[i] = hand_states_traj[0][2:26]
-                    prev_actions = dict()
-                    for i in range(history_state + 1):
-                        prev_actions[i] = hand_states_traj[0][2:26]
-                while t < task_horizon - 1:  # what would be early-termination for door task?
-                    o = self.get_obs()
-                    if not policy.freeze_base:
-                        current_hand_state = self.get_env_state()['qpos'][:num_hand]
-                    else:
+            print("Success rate = %f" % (len(success_list_sim) / num_episodes))
                         current_hand_state = self.get_env_state()['qpos'][2:26]
                         num_hand = 24
                     current_objpos = o[49:52] + o[42:45]
@@ -1245,7 +1322,17 @@ class GymEnv(object):
                             a += hand_states_traj[t + 1].copy() 
                         else:
                             a += hand_states_traj[t + 1][2:26].copy() 
+                    
+                    if record_video:
+                        episode_actions.append(a.copy())
+                        if not policy.freeze_base:
+                            episode_target_positions.append(hand_states_traj[t + 1].copy())
+                        else:
+                            episode_target_positions.append(hand_states_traj[t + 1][2:26].copy())
+                        episode_target_velocities.append(object_states_traj[t + 1][6:12].copy())  # hammer objvel
+                    
                     # update the history information
+                
                     if history_state >= 0:
                         for i in range(history_state):
                             prev_actions[i] = prev_actions[i + 1]
@@ -1282,6 +1369,14 @@ class GymEnv(object):
                     tracking_rewards[ep] += (gamma ** t) * tracking_reward  # only tracking rewards
                     t += 1   
                     dist = np.linalg.norm(next_o[42:45] - next_o[46:49])
+                if record_video and len(episode_frames) > 0:
+                    all_episode_frames.append(episode_frames)
+                    print(f"  Episode {ep}: captured {len(episode_frames)} frames")
+                
+                all_actions.append(np.array(episode_actions))
+                all_target_positions.append(np.array(episode_target_positions))
+                all_target_velocities.append(np.array(episode_target_velocities))
+                
                 if dist < 0.01:
                     success_list_sim.append(1)
                 total_score += ep_returns[ep]
@@ -1297,6 +1392,42 @@ class GymEnv(object):
         for p in percentile:
             percentile_stats.append(np.percentile(ep_returns, p))
         full_dist = ep_returns if get_full_dist is True else None
+        if record_video and video_path and len(all_episode_frames) > 0:
+            try:
+                import imageio
+                import os    
+                # Create directory if needed
+                video_dir = os.path.dirname(video_path)
+                if video_dir and not os.path.exists(video_dir):
+                    os.makedirs(video_dir)
+                
+                # Save each episode as separate video
+                for ep_idx, frames in enumerate(all_episode_frames):
+                    if len(frames) > 0:
+                        video_file = f"{video_path}_ep{ep_idx}.mp4"
+                        imageio.mimsave(video_file, frames, fps=30)
+                        print(f"✅ Saved video: {video_file}")
+                
+                print(f"\n🎬 Saved {len(all_episode_frames)} videos total")
+
+                print("\n💾 Saving trajectory data...")
+                for ep_idx in range(len(all_actions)):
+                    actions_file = f"{video_path}_actions_ep{ep_idx}.npy"
+                    target_pos_file = f"{video_path}_target_positions_ep{ep_idx}.npy"
+                    target_vel_file = f"{video_path}_target_velocities_ep{ep_idx}.npy"
+                    
+                    np.save(actions_file, all_actions[ep_idx])
+                    np.save(target_pos_file, all_target_positions[ep_idx])
+                    np.save(target_vel_file, all_target_velocities[ep_idx])
+                
+                print(f"✅ Saved {len(all_actions)} trajectory files")
+                print(f"   - {video_path}_actions_ep*.npy")
+                print(f"   - {video_path}_target_positions_ep*.npy")
+                print(f"   - {video_path}_target_velocities_ep*.npy")
+
+            except Exception as e:
+                print(f"❌ Error saving videos: {e}")
+                print("   Make sure imageio is installed: pip install imageio imageio-ffmpeg")
         return [base_stats, percentile_stats, full_dist]
     
     def evaluate_trained_mean_policy(self, 
