@@ -22,6 +22,7 @@ import pickle
 import argparse
 import matplotlib.pyplot as plt
 import matplotlib as mpl
+import numpy as np
 
 # using the recommendated fig params from https://github.com/jbmouret/matplotlib_for_papers#pylab-vs-matplotlib
 fig_params = {
