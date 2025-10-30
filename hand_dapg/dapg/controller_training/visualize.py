@@ -678,3 +678,5 @@ if Record_video:
     print("\n" + "="*60)
     print("VIDEO RECORDING COMPLETE")
     print("="*60)
+
+    #python hand_dapg/dapg/controller_training/visualize.py   --eval_data Samples/Hammer/Hammer_task.pickle   --config Samples/Hammer/CIMER/job_config.json   --policy Samples/Hammer/CIMER/best_eval_sr_policy.pickle   --visualize False   --save_fig False   --record_video True
