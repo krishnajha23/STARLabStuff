@@ -22,7 +22,6 @@ import pickle
 import argparse
 import matplotlib.pyplot as plt
 import matplotlib as mpl
-import numpy as np
 
 # using the recommendated fig params from https://github.com/jbmouret/matplotlib_for_papers#pylab-vs-matplotlib
 fig_params = {
@@ -109,8 +108,7 @@ parser.add_argument('--eval_data', type=str, required=True, help='absolute path 
 parser.add_argument('--visualize', type=str, required=True, help='determine if visualizing the policy or not')
 parser.add_argument('--save_fig', type=str, required=True, help='determine if saving all generated figures')
 parser.add_argument('--only_record_video', type=str, required=False, default='False', help='determine if only recording the policy rollout')
-parser.add_argument('--record_video', type=str, required=False, default='False', 
-                    help='record videos of simulation')
+
 args = parser.parse_args()
 with open(args.config, 'r') as f:
     job_data = eval(f.read())
@@ -124,9 +122,6 @@ if args.save_fig == "True":
 Only_record_video = False
 if args.only_record_video == "True":
     Only_record_video = True
-Record_video = False
-if args.record_video == "True":
-    Record_video = True
 assert any([job_data['algorithm'] == a for a in ['NPG', 'TRPO', 'PPO']])  # start from natural policy gradient for training
 assert os.path.exists(os.getcwd() + job_data['matrix_file'] + job_data['env'].split('-')[0] + '/koopmanMatrix.npy')  # loading KODex reference dynamics
 KODex = np.load(os.getcwd() + job_data['matrix_file'] + job_data['env'].split('-')[0] + '/koopmanMatrix.npy')
@@ -642,42 +637,3 @@ else:  # Only_record_video
         e.Visualze_CIMER_policy(Eval_data, Simple_PID, coeffcients, Koopman_obser, KODex, task_horizon, job_data['future_s'], job_data['history_s'], policy, num_episodes=len(demos), gamma = gamma, obj_dynamics = job_data['obj_dynamics'], visual = visualize, object_name = job_data['object'])  # noise-free actions
     else:
         e.Visualze_CIMER_policy(Eval_data, Simple_PID, coeffcients, Koopman_obser, KODex, task_horizon, job_data['future_s'], job_data['history_s'], policy, num_episodes=len(demos), gamma = gamma, obj_dynamics = job_data['obj_dynamics'], visual = visualize)  # noise-free actions        
-# Simple video recording mode
-if Record_video:
-    print("\n" + "="*60)
-    print("VIDEO RECORDING MODE")
-    print("="*60)
-    
-    # Set up video path
-    root_dir = os.getcwd() + "/" + args.policy[:args.policy.find('.')] if '.' in args.policy else os.getcwd()
-    if not os.path.exists(root_dir):
-        os.mkdir(root_dir)
-    video_path = os.path.join(root_dir, 'video')
-    
-    print(f"Videos will be saved to: {video_path}_epX.mp4")
-    
-    num_demos = min(50, len(demos))
-    
-    # Run evaluation with video recording
-    score = e.evaluate_policy(
-        Eval_data, 
-        Simple_PID, 
-        coeffcients, 
-        Koopman_obser, 
-        KODex, 
-        task_horizon, 
-        job_data['future_s'], 
-        job_data['history_s'], 
-        policy, 
-        num_episodes=num_demos,
-        gamma=gamma, 
-        obj_dynamics=job_data['obj_dynamics'],
-        record_video=True,
-        video_path=video_path
-    )
-    
-    print("\n" + "="*60)
-    print("VIDEO RECORDING COMPLETE")
-    print("="*60)
-
-    #python hand_dapg/dapg/controller_training/visualize.py   --eval_data Samples/Hammer/Hammer_task.pickle   --config Samples/Hammer/CIMER/job_config.json   --policy Samples/Hammer/CIMER/best_eval_sr_policy.pickle   --visualize False   --save_fig False   --record_video True
