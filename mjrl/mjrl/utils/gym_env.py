@@ -2,6 +2,7 @@
 Wrapper around a gym env that provides convenience functions
 """
 
+import cv2
 import gym
 from mjrl.policies.ncp_network import NCPNetwork
 from mjrl.policies.rnn_network import RNNNetwork
@@ -4113,13 +4114,20 @@ class GymEnv(object):
                         visual=False,
                         object_name='',
                         terminate_at_done=True,
-                        seed=123):
+                        seed=123,
+                        record_video=False,
+                        save_frames=False,
+                    camera_name='vil_camera'):
         self.set_seed(seed)
         task = self.env_id.split('-')[0]
         num_future_s = len(future_state)
         save_path = os.path.join(os.getcwd(), 'Videos', task, object_name)[:-1] + '_CIMER.mp4'
         # save_traj = 50  # used for the default object on each task
         save_traj = 20  # used for the new objects on the relocation task
+        video_writer = None
+        frame_count = 0
+        os.makedirs('Videos', exist_ok=True)
+        os.makedirs('Frames', exist_ok=True)
         if task == 'relocate':
             success_list_sim = []
             success_threshold = 10
@@ -4191,7 +4199,23 @@ class GymEnv(object):
                 if visual:
                     print("Episode %d, KOdex with motion adapter (mean action)." %(ep + 1))
                 while t < task_horizon - 1 and obj_height > -0.05 :  # what would be early-termination for relocation task?
-                    self.render() if visual is True else None
+                    if visual or record_video or save_frames:
+                        self.render() if visual else None
+                        frame = self.env.sim.render(640, 480, camera_name=camera_name)
+                        frame = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
+                        
+                        if save_frames:
+                            cv2.imwrite(f'Frames/hammer_ep{ep:03d}_frame{t:04d}.png', frame)
+                        
+                        if record_video:
+                            if video_writer is None:
+                                video_writer = cv2.VideoWriter(
+                                    f'Videos/hammer_ep{ep:03d}.mp4', 
+                                    cv2.VideoWriter_fourcc(*'mp4v'), 
+                                    30, 
+                                    (640, 480)
+                                )
+                            video_writer.write(frame)
                     o = self.get_obs()
                     if not policy.freeze_base:
                         current_hand_state = o[:30]
@@ -4344,6 +4368,9 @@ class GymEnv(object):
                     Episodes.append(goal_achieved['goal_achieved'])
                     obj_height = next_o[41]
                     t += 1   
+                if video_writer is not None:
+                    video_writer.release()
+                    video_writer = None
                 if sum(Episodes) > success_threshold:
                     success_list_sim.append(1)
             print("(CIMER) Success rate = %f" % (len(success_list_sim) / num_episodes))

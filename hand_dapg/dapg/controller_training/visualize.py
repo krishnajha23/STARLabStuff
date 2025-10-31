@@ -108,6 +108,10 @@ parser.add_argument('--eval_data', type=str, required=True, help='absolute path 
 parser.add_argument('--visualize', type=str, required=True, help='determine if visualizing the policy or not')
 parser.add_argument('--save_fig', type=str, required=True, help='determine if saving all generated figures')
 parser.add_argument('--only_record_video', type=str, required=False, default='False', help='determine if only recording the policy rollout')
+parser.add_argument('--record_video', type=str, default='True')
+parser.add_argument('--save_frames', type=str, default='True')
+parser.add_argument('--camera_name', type=str, default='vil_camera')
+
 
 args = parser.parse_args()
 with open(args.config, 'r') as f:
@@ -636,4 +640,4 @@ else:  # Only_record_video
     if task_id == 'relocate':
         e.Visualze_CIMER_policy(Eval_data, Simple_PID, coeffcients, Koopman_obser, KODex, task_horizon, job_data['future_s'], job_data['history_s'], policy, num_episodes=len(demos), gamma = gamma, obj_dynamics = job_data['obj_dynamics'], visual = visualize, object_name = job_data['object'])  # noise-free actions
     else:
-        e.Visualze_CIMER_policy(Eval_data, Simple_PID, coeffcients, Koopman_obser, KODex, task_horizon, job_data['future_s'], job_data['history_s'], policy, num_episodes=len(demos), gamma = gamma, obj_dynamics = job_data['obj_dynamics'], visual = visualize)  # noise-free actions        
+        e.Visualze_CIMER_policy(Eval_data, Simple_PID, coeffcients, Koopman_obser, KODex, task_horizon, job_data['future_s'], job_data['history_s'], policy, num_episodes=len(demos), gamma = gamma, obj_dynamics = job_data['obj_dynamics'], visual = visualize, record_video=args.record_video=='True', save_frames=args.save_frames=='True', camera_name=args.camera_name)  # noise-free actions        
