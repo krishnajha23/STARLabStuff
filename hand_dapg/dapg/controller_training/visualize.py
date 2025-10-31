@@ -1,387 +1,639 @@
 """
-Standalone visualization script for CIMER trajectory data
+This is a job script for controller learning for KODex 1.0
 """
 
-import numpy as np
-import matplotlib.pyplot as plt
-from matplotlib.animation import FuncAnimation, FFMpegWriter
-import argparse
+from re import A
+from mjrl.utils.gym_env import GymEnv
+from mjrl.policies.gaussian_mlp import MLP
+from mjrl.algos.npg_cg import NPG
+from mjrl.utils.train_agent import train_agent
+from mjrl.samplers.core import sample_paths
+from mjrl.KODex_utils.Observables import *
+from mjrl.KODex_utils.quatmath import quat2euler, euler2quat
+from mjrl.KODex_utils.coord_trans import ori_transform, ori_transform_inverse
+from mjrl.KODex_utils.Controller import *
+import sys
 import os
-import glob
+import json
+import mjrl.envs
+import mj_envs   # read the env files (task files)
+import time as timer
+import pickle
+import argparse
+import matplotlib.pyplot as plt
+import matplotlib as mpl
 
-def load_trajectory_data(video_path, episode_idx):
-    """Load trajectory data for a specific episode"""
-    actions_file = f"{video_path}_actions_ep{episode_idx}.npy"
-    target_pos_file = f"{video_path}_target_positions_ep{episode_idx}.npy"
-    target_vel_file = f"{video_path}_target_velocities_ep{episode_idx}.npy"
-    
-    if not os.path.exists(actions_file):
-        raise FileNotFoundError(f"Actions file not found: {actions_file}")
-    if not os.path.exists(target_pos_file):
-        raise FileNotFoundError(f"Target positions file not found: {target_pos_file}")
-    if not os.path.exists(target_vel_file):
-        raise FileNotFoundError(f"Target velocities file not found: {target_vel_file}")
-    
-    actions = np.load(actions_file)
-    target_positions = np.load(target_pos_file)
-    target_velocities = np.load(target_vel_file)
-    
-    return actions, target_positions, target_velocities
+# using the recommendated fig params from https://github.com/jbmouret/matplotlib_for_papers#pylab-vs-matplotlib
+fig_params = {
+'axes.labelsize': 10,
+'axes.titlesize':15,
+'font.size': 10,
+'legend.fontsize': 10,
+'xtick.labelsize': 10,
+'ytick.labelsize': 10,
+'text.usetex': False,
+'figure.figsize': [5, 4.5]
+}
+mpl.rcParams.update(fig_params)
 
-def create_trajectory_plots(actions, target_positions, target_velocities, output_path, task_name, episode_idx):
-    """Create comprehensive trajectory visualization plots"""
-    
-    num_timesteps = len(actions)
-    timesteps = np.arange(num_timesteps)
-    
-    # Determine dimensions
-    num_action_dims = actions.shape[1]
-    num_pos_dims = target_positions.shape[1]
-    num_vel_dims = target_velocities.shape[1]
-    
-    # Create figure with subplots
-    fig = plt.figure(figsize=(20, 12))
-    
-    # 1. Actions over time
-    ax1 = plt.subplot(3, 2, 1)
-    dims_to_plot = min(num_action_dims, 6)
-    for i in range(dims_to_plot):
-        ax1.plot(timesteps, actions[:, i], label=f'Dim {i+1}', alpha=0.7, linewidth=2)
-    ax1.set_xlabel('Timestep', fontsize=14)
-    ax1.set_ylabel('Action Value', fontsize=14)
-    ax1.set_title(f'{task_name} - Actions Over Time (Episode {episode_idx})', fontsize=16, fontweight='bold')
-    ax1.legend(loc='upper right', fontsize=10, ncol=2)
-    ax1.grid(True, alpha=0.3)
-    ax1.tick_params(labelsize=12)
-    
-    # 2. Target Positions over time
-    ax2 = plt.subplot(3, 2, 2)
-    dims_to_plot = min(num_pos_dims, 6)
-    for i in range(dims_to_plot):
-        ax2.plot(timesteps, target_positions[:, i], label=f'Dim {i+1}', alpha=0.7, linewidth=2)
-    ax2.set_xlabel('Timestep', fontsize=14)
-    ax2.set_ylabel('Position Value', fontsize=14)
-    ax2.set_title(f'{task_name} - Target Positions Over Time', fontsize=16, fontweight='bold')
-    ax2.legend(loc='upper right', fontsize=10, ncol=2)
-    ax2.grid(True, alpha=0.3)
-    ax2.tick_params(labelsize=12)
-    
-    # 3. Target Velocities over time
-    ax3 = plt.subplot(3, 2, 3)
-    for i in range(num_vel_dims):
-        ax3.plot(timesteps, target_velocities[:, i], label=f'Vel {i+1}', alpha=0.7, linewidth=2)
-    ax3.set_xlabel('Timestep', fontsize=14)
-    ax3.set_ylabel('Velocity Value', fontsize=14)
-    ax3.set_title(f'{task_name} - Target Velocities Over Time', fontsize=16, fontweight='bold')
-    ax3.legend(loc='upper right', fontsize=10)
-    ax3.grid(True, alpha=0.3)
-    ax3.tick_params(labelsize=12)
-    
-    # 4. Action magnitudes
-    ax4 = plt.subplot(3, 2, 4)
-    action_norms = np.linalg.norm(actions, axis=1)
-    ax4.plot(timesteps, action_norms, color='purple', linewidth=2.5)
-    ax4.fill_between(timesteps, 0, action_norms, alpha=0.3, color='purple')
-    ax4.set_xlabel('Timestep', fontsize=14)
-    ax4.set_ylabel('L2 Norm', fontsize=14)
-    ax4.set_title(f'{task_name} - Action Magnitude Over Time', fontsize=16, fontweight='bold')
-    ax4.grid(True, alpha=0.3)
-    ax4.tick_params(labelsize=12)
-    
-    # 5. Position changes
-    ax5 = plt.subplot(3, 2, 5)
-    pos_changes = np.diff(target_positions, axis=0)
-    pos_change_norms = np.linalg.norm(pos_changes, axis=1)
-    ax5.plot(timesteps[1:], pos_change_norms, color='green', linewidth=2.5)
-    ax5.fill_between(timesteps[1:], 0, pos_change_norms, alpha=0.3, color='green')
-    ax5.set_xlabel('Timestep', fontsize=14)
-    ax5.set_ylabel('Change Magnitude', fontsize=14)
-    ax5.set_title(f'{task_name} - Position Change Rate', fontsize=16, fontweight='bold')
-    ax5.grid(True, alpha=0.3)
-    ax5.tick_params(labelsize=12)
-    
-    # 6. Statistics summary
-    ax6 = plt.subplot(3, 2, 6)
-    ax6.axis('off')
-    
-    stats_text = f"""Trajectory Statistics (Episode {episode_idx})
-    
-Actions:
-  Shape: {actions.shape}
-  Mean: {np.mean(actions):.4f}
-  Std: {np.std(actions):.4f}
-  Min: {np.min(actions):.4f}
-  Max: {np.max(actions):.4f}
+def demo_playback(demo_paths, num_demo, task_id):
+    Training_data = []
+    print("Begin loading demo data!")
+    # sample_index = np.random.choice(len(demo_paths), num_demo, replace=False)  # Random data is used
+    sample_index = range(num_demo)
+    for t in sample_index:  # only read the initial conditions
+        path = demo_paths[t]
+        state_dict = {}
+        if task_id == 'pen':
+            observations = path['observations']  
+            handVelocity = path['handVelocity']  
+            obs = observations[0] # indeed this one is defined in the world frame(fixed on the table) (for object position and object orientations)
+            state_dict['init_states'] = path['init_state_dict']
+            state_dict['handpos'] = obs[:24]
+            state_dict['handvel'] = handVelocity[0]
+            state_dict['objpos'] = obs[24:27] # in the world frame(on the table)
+            state_dict['objvel'] = obs[27:33]
+            state_dict['desired_ori'] = obs[36:39] # desired orientation (an unit vector in the world frame)
+            state_dict['objorient'] = obs[33:36] # initial orientation (an unit vector in the world frame)
+        elif task_id == 'relocate':
+            observations = path['observations']  
+            observations_visualize = path['observations_visualization']
+            handVelocity = path['handVelocity'] 
+            obs = observations[0] 
+            obs_visual = observations_visualize[0]
+            state_dict['init_states'] = path['init_state_dict']
+            state_dict['handpos'] = obs[:30]
+            state_dict['handvel'] = handVelocity[0][:30]
+            objpos = obs[39:42] # in the world frame(on the table)
+            state_dict['desired_pos'] = obs[45:48] 
+            state_dict['objpos'] = objpos - obs[45:48] # converged object position
+            state_dict['objorient'] = obs_visual[33:36]
+            state_dict['objvel'] = handVelocity[0][30:]
+        elif task_id == 'door':
+            observations = path['observations']  
+            observations_visualize = path['observations_visualization']
+            obs = observations[0] 
+            obs_visual = observations_visualize[0]
+            state_dict['init_states'] = path['init_state_dict']
+            state_dict['handpos'] = obs_visual[:28]
+            state_dict['handvel'] = obs_visual[30:58]
+            state_dict['objpos'] = obs[32:35]  # handle position
+            state_dict['objvel'] = obs_visual[58:59]  # door hinge
+            state_dict['handle_init'] = path['init_state_dict']['door_body_pos']
+        elif task_id == 'hammer':
+            observations = path['observations'] 
+            handVelocity = path['handVelocity'] 
+            obs = observations[0]
+            allvel = handVelocity[0]
+            state_dict['init_states'] = path['init_state_dict']
+            state_dict['handpos'] = obs[:26]
+            state_dict['handvel'] = allvel[:26]
+            state_dict['objpos'] = obs[49:52] + obs[42:45] 
+            state_dict['objorient'] = obs[39:42]
+            state_dict['objvel'] = obs[27:33]
+            state_dict['nail_goal'] = obs[46:49]
+        Training_data.append(state_dict)
+    print("Finish loading demo data!")
+    return Training_data
 
-Target Positions:
-  Shape: {target_positions.shape}
-  Mean: {np.mean(target_positions):.4f}
-  Std: {np.std(target_positions):.4f}
-  Range: [{np.min(target_positions):.4f}, {np.max(target_positions):.4f}]
 
-Target Velocities:
-  Shape: {target_velocities.shape}
-  Mean: {np.mean(target_velocities):.4f}
-  Std: {np.std(target_velocities):.4f}
-  Range: [{np.min(target_velocities):.4f}, {np.max(target_velocities):.4f}]
+# ===============================================================================
+# Get command line arguments
+# ===============================================================================
 
-Trajectory Length: {num_timesteps} timesteps
-"""
-    
-    ax6.text(0.05, 0.5, stats_text, fontsize=11, verticalalignment='center',
-             family='monospace', bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.7))
-    
-    plt.tight_layout()
-    plt.savefig(output_path, dpi=150, bbox_inches='tight')
-    print(f"✅ Saved trajectory plot: {output_path}")
-    plt.close()
+parser = argparse.ArgumentParser(description='Policy gradient algorithms with demonstration data.')
+parser.add_argument('--config', type=str, required=True, help='path to config file with exp params')
+parser.add_argument('--policy', type=str, required=True, help='absolute path of the policy file')
+parser.add_argument('--eval_data', type=str, required=True, help='absolute path to evaluation data')
+parser.add_argument('--visualize', type=str, required=True, help='determine if visualizing the policy or not')
+parser.add_argument('--save_fig', type=str, required=True, help='determine if saving all generated figures')
+parser.add_argument('--only_record_video', type=str, required=False, default='False', help='determine if only recording the policy rollout')
 
-def create_heatmap_visualization(actions, target_positions, output_path, task_name, episode_idx):
-    """Create heatmap visualizations of trajectories"""
-    
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(18, 6))
-    
-    # Actions heatmap
-    im1 = ax1.imshow(actions.T, aspect='auto', cmap='viridis', interpolation='nearest')
-    ax1.set_xlabel('Timestep', fontsize=14)
-    ax1.set_ylabel('Action Dimension', fontsize=14)
-    ax1.set_title(f'{task_name} - Actions Heatmap (Episode {episode_idx})', fontsize=16, fontweight='bold')
-    cbar1 = plt.colorbar(im1, ax=ax1)
-    cbar1.set_label('Action Value', fontsize=12)
-    ax1.tick_params(labelsize=12)
-    
-    # Target positions heatmap
-    im2 = ax2.imshow(target_positions.T, aspect='auto', cmap='plasma', interpolation='nearest')
-    ax2.set_xlabel('Timestep', fontsize=14)
-    ax2.set_ylabel('Position Dimension', fontsize=14)
-    ax2.set_title(f'{task_name} - Target Positions Heatmap (Episode {episode_idx})', fontsize=16, fontweight='bold')
-    cbar2 = plt.colorbar(im2, ax=ax2)
-    cbar2.set_label('Position Value', fontsize=12)
-    ax2.tick_params(labelsize=12)
-    
-    plt.tight_layout()
-    plt.savefig(output_path, dpi=150, bbox_inches='tight')
-    print(f"✅ Saved heatmap visualization: {output_path}")
-    plt.close()
+args = parser.parse_args()
+with open(args.config, 'r') as f:
+    job_data = eval(f.read())
+assert 'algorithm' in job_data.keys()
+visualize = False
+if args.visualize == "True":
+    visualize = True
+Save_fig = False
+if args.save_fig == "True":
+    Save_fig = True
+Only_record_video = False
+if args.only_record_video == "True":
+    Only_record_video = True
+assert any([job_data['algorithm'] == a for a in ['NPG', 'TRPO', 'PPO']])  # start from natural policy gradient for training
+assert os.path.exists(os.getcwd() + job_data['matrix_file'] + job_data['env'].split('-')[0] + '/koopmanMatrix.npy')  # loading KODex reference dynamics
+KODex = np.load(os.getcwd() + job_data['matrix_file'] + job_data['env'].split('-')[0] + '/koopmanMatrix.npy')
 
-def create_animated_trajectory(actions, target_positions, output_path, task_name, episode_idx):
-    """Create an animated visualization of the trajectory"""
-    
-    num_timesteps = len(actions)
-    num_action_dims = min(actions.shape[1], 3)
-    
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(18, 6))
-    
-    # Setup action plot
-    lines_actions = []
-    colors = ['#1f77b4', '#ff7f0e', '#2ca02c']
-    for i in range(num_action_dims):
-        line, = ax1.plot([], [], label=f'Action Dim {i+1}', linewidth=2.5, color=colors[i])
-        lines_actions.append(line)
-    
-    ax1.set_xlim(0, num_timesteps)
-    ax1.set_ylim(np.min(actions[:, :num_action_dims]) * 1.1, 
-                 np.max(actions[:, :num_action_dims]) * 1.1)
-    ax1.set_xlabel('Timestep', fontsize=14)
-    ax1.set_ylabel('Action Value', fontsize=14)
-    ax1.set_title(f'{task_name} - Actions (Episode {episode_idx})', fontsize=16, fontweight='bold')
-    ax1.legend(loc='upper right', fontsize=12)
-    ax1.grid(True, alpha=0.3)
-    ax1.tick_params(labelsize=12)
-    
-    # Setup position plot
-    num_pos_dims = min(target_positions.shape[1], 3)
-    lines_positions = []
-    for i in range(num_pos_dims):
-        line, = ax2.plot([], [], label=f'Position Dim {i+1}', linewidth=2.5, color=colors[i])
-        lines_positions.append(line)
-    
-    ax2.set_xlim(0, num_timesteps)
-    ax2.set_ylim(np.min(target_positions[:, :num_pos_dims]) * 1.1, 
-                 np.max(target_positions[:, :num_pos_dims]) * 1.1)
-    ax2.set_xlabel('Timestep', fontsize=14)
-    ax2.set_ylabel('Position Value', fontsize=14)
-    ax2.set_title(f'{task_name} - Target Positions (Episode {episode_idx})', fontsize=16, fontweight='bold')
-    ax2.legend(loc='upper right', fontsize=12)
-    ax2.grid(True, alpha=0.3)
-    ax2.tick_params(labelsize=12)
-    
-    time_text = ax1.text(0.02, 0.95, '', transform=ax1.transAxes, fontsize=14,
-                        verticalalignment='top', bbox=dict(boxstyle='round', facecolor='yellow', alpha=0.7))
-    
-    def init():
-        for line in lines_actions + lines_positions:
-            line.set_data([], [])
-        time_text.set_text('')
-        return lines_actions + lines_positions + [time_text]
-    
-    def animate(frame):
-        for i, line in enumerate(lines_actions):
-            line.set_data(range(frame), actions[:frame, i])
-        
-        for i, line in enumerate(lines_positions):
-            line.set_data(range(frame), target_positions[:frame, i])
-        
-        time_text.set_text(f'Timestep: {frame}/{num_timesteps}')
-        return lines_actions + lines_positions + [time_text]
-    
-    anim = FuncAnimation(fig, animate, init_func=init, frames=num_timesteps,
-                        interval=50, blit=True, repeat=True)
-    
-    try:
-        writer = FFMpegWriter(fps=20, bitrate=2000)
-        anim.save(output_path, writer=writer)
-        print(f"✅ Saved animated trajectory: {output_path}")
-    except Exception as e:
-        print(f"❌ Error saving animation: {e}")
-        print("   Make sure ffmpeg is installed")
-    finally:
-        plt.close()
+# ===============================================================================
+# Set up the controller parameter
+# ===============================================================================
+# This set is used for control frequency: 500HZ (for all DoF)
+PID_P = 10
+PID_D = 0.005  
+Simple_PID = PID(PID_P, 0.0, PID_D)
+# ===============================================================================
+# Task specification
+# ===============================================================================
+task_id = job_data['env'].split('-')[0]
+if task_id == 'pen':
+    num_robot_s = 24
+    num_object_s = 12
+    task_horizon = 100
+elif task_id == 'relocate':
+    Obj_sets = ['banana', 'cracker_box', 'cube', 'cylinder', 'foam_brick', 'gelatin_box', 'large_clamp', 'master_chef_can', 'mug', 'mustard_bottle', 'potted_meat_can', 'power_drill', 'pudding_box', 'small_ball', 'sugar_box', 'tomato_soup_can', 'tuna_fish_can']
+    try: 
+        if job_data['object'] not in Obj_sets:
+            job_data['object'] = ''  # default setting
+    except:
+        job_data['object'] = '' # default setting
+    num_robot_s = 30
+    num_object_s = 12
+    task_horizon = 100
+elif task_id == 'door':
+    num_robot_s = 28
+    num_object_s = 7
+    task_horizon = 70
+elif task_id == 'hammer':
+    num_robot_s = 26
+    num_object_s = 15
+    task_horizon = 71  # stable motions after hit
+else:
+    print("Unkown task!")
+    sys.exit()
+# ===============================================================================
+# Train Loop
+# ===============================================================================
+if job_data['control_mode'] not in ['Torque', 'PID']:
+    print('Unknown action space! Please check the parameter control_mode in the job script.')
+    sys.exit()
+# Visualization
+if task_id == 'relocate':
+    e = GymEnv(job_data['env'], job_data['control_mode'], job_data['object'])  # an unified env wrapper for all kind of envs
+else:
+    e = GymEnv(job_data['env'], job_data['control_mode'])  # an unified env wrapper for other envs
+policy = pickle.load(open(args.policy, 'rb'))  
+Koopman_obser = DraftedObservable(num_robot_s, num_object_s)
+demos = pickle.load(open(args.eval_data, 'rb'))
+Eval_data = demo_playback(demos, len(demos), task_id)
+coeffcients = dict()
+coeffcients['task_ratio'] = job_data['task_ratio']
+coeffcients['tracking_ratio'] = job_data['tracking_ratio']
+coeffcients['hand_track'] = job_data['hand_track']
+coeffcients['object_track'] = job_data['object_track']
+coeffcients['ADD_BONUS_REWARDS'] = 1 # when evaluating the policy, it is always set to be enabled
+coeffcients['ADD_BONUS_PENALTY'] = 1
+gamma = 1.
+print("gamma:", gamma)
+try:
+    policy.freeze_base
+except:
+    policy.freeze_base = False        
+try:
+    policy.include_Rots
+except:
+    policy.include_Rots = False   
+print(policy.m)
+# plug into a NN-based controller for Door task and test its performance, and also, tried to be compatible with the 24 DoFs training case.
+# load a door opening controller, which is important to 
+if not Only_record_video:
+    if task_id == 'pen':
+        score = e.evaluate_trained_policy(Eval_data, Simple_PID, coeffcients, Koopman_obser, KODex, task_horizon, job_data['future_s'], job_data['history_s'], policy, num_episodes=len(demos), gamma = gamma, obj_dynamics = job_data['obj_dynamics'], visual = visualize)  # noise-free actions
+        # score[0][0] -> mean sum rewards for rollout (task-specific rewards)
+        # because we are now in evaluation mode, the reward/score here is the sum of gamma_discounted rewards at t=0 (the sum rewards at other states at t=1,..,T are ignored) 
+        # In other words, this can be seen as the reward in the domain of trajectory.
+        print("(gamma = %f)\n KODex with PD: mean task reward = %f, mean total tracking reward = %f, mean hand tracking reward = %f, mean object tracking reward = %f" % (gamma, score[0][0], score[0][4], score[0][8], score[0][9]))
+        print("KODex with motion adapter (mean action): mean task reward = %f, mean total tracking reward = %f, mean hand tracking reward = %f, mean object tracking reward = %f" % (score[1][0], score[1][4], score[1][8], score[1][9]))
+        print("KODex with motion adapter (noisy action): mean task reward = %f, mean total tracking reward = %f, mean hand tracking reward = %f, mean object tracking reward = %f" % (score[2][0], score[2][4], score[2][8], score[2][9]))
+    elif task_id == 'door':
+        score, R_z_motions = e.evaluate_trained_policy(Eval_data, Simple_PID, coeffcients, Koopman_obser, KODex, task_horizon, job_data['future_s'], job_data['history_s'], policy, num_episodes=len(demos), gamma = gamma, obj_dynamics = job_data['obj_dynamics'], visual = visualize)  # noise-free actions
+        # score[0][0] -> mean sum rewards for rollout (task-specific rewards)
+        # because we are now in evaluation mode, the reward/score here is the sum of gamma_discounted rewards at t=0 (the sum rewards at other states at t=1,..,T are ignored) 
+        # In other words, this can be seen as the reward in the domain of trajectory.
+        print("(gamma = %f)\n KODex with PD: mean task reward = %f, mean total tracking reward = %f, mean hand tracking reward = %f, mean object tracking reward = %f" % (gamma, score[0][0], score[0][4], score[0][8], score[0][9]))
+        print("KODex with motion adapter (mean action): mean task reward = %f, mean total tracking reward = %f, mean hand tracking reward = %f, mean object tracking reward = %f" % (score[1][0], score[1][4], score[1][8], score[1][9]))
+        print("KODex with motion adapter (noisy action): mean task reward = %f, mean total tracking reward = %f, mean hand tracking reward = %f, mean object tracking reward = %f" % (score[2][0], score[2][4], score[2][8], score[2][9]))
+        if Save_fig:  # study on how the motion get updated for the door task.
+            root_dir = os.getcwd() + "/" + args.policy[:args.policy.find('.')]
+            if not os.path.exists(root_dir):
+                os.mkdir(root_dir)
+            R_z_motion_MA, R_z_motion_PD = R_z_motions
+            all_index = [i for i in range(len(Eval_data))]
+            PD_motions = np.zeros([len(all_index), len(R_z_motion_PD[0])])
+            MA_motions = np.zeros([len(all_index), len(R_z_motion_MA[0])])
+            for i in range(len(all_index)):
+                PD_motions[i, :] = np.array(R_z_motion_PD[all_index[i]])
+                MA_motions[i, :] = np.array(R_z_motion_MA[all_index[i]])
+            mean_ours, std_ours = np.mean(MA_motions, axis = 0), np.std(MA_motions, axis=0)
+            mean_kodex_pd, std_kodex_pd = np.mean(PD_motions, axis = 0), np.std(PD_motions, axis=0)
+            x_simu = np.arange(0, MA_motions.shape[1])
+            fig, ax = plt.subplots()
+            ax.plot(x_simu, mean_ours, linewidth=3, label = 'CIMER', color='purple')
+            ax.fill_between(x_simu, mean_ours - std_ours, mean_ours + std_ours, alpha = 0.15, linewidth = 0, color='purple')
+            ax.plot(x_simu, mean_kodex_pd, linewidth=3, label = 'Imitator + PD', color='b')
+            ax.fill_between(x_simu, mean_kodex_pd - std_kodex_pd, mean_kodex_pd + std_kodex_pd, alpha = 0.15, linewidth = 0, color='b')
+            ax.grid(True)
+            plt.vlines(12, min(mean_ours), max(mean_ours), linewidth=3, linestyles='dotted', colors='k')  # around 12 iter, the hand begins to turn over the handle
+            plt.vlines(30, min(mean_ours), max(mean_ours), linewidth=3, linestyles='dotted', colors='k')  # around 30 iter, the hand ends at turn over the handle
+            # fig.suptitle("Changes of Rotation Angle", fontsize=22) #  for Handle Turning
+            fig.supxlabel('Time Step', fontsize=20)
+            fig.supylabel('Rotation Angle (rad)', fontsize=20)
+            ax.tick_params(axis='both', labelsize=16)
+            # legend = plt.legend(fontsize=10)
+            # frame = legend.get_frame()
+            # frame.set_facecolor('0.9')
+            # frame.set_edgecolor('0.9')
+            plt.tight_layout()
+            plt.savefig(root_dir + '/rotation.png')
+            plt.close()
+    elif task_id == 'hammer':
+        score, height_values = e.evaluate_trained_policy(Eval_data, Simple_PID, coeffcients, Koopman_obser, KODex, task_horizon, job_data['future_s'], job_data['history_s'], policy, num_episodes=len(demos), gamma = gamma, obj_dynamics = job_data['obj_dynamics'], visual = visualize)  # noise-free actions
+        # score[0][0] -> mean sum rewards for rollout (task-specific rewards)
+        # because we are now in evaluation mode, the reward/score here is the sum of gamma_discounted rewards at t=0 (the sum rewards at other states at t=1,..,T are ignored) 
+        # In other words, this can be seen as the reward in the domain of trajectory.
+        print("(gamma = %f)\n KODex with PD: mean task reward = %f, mean total tracking reward = %f, mean hand tracking reward = %f, mean object tracking reward = %f" % (gamma, score[0][0], score[0][4], score[0][8], score[0][9]))
+        print("KODex with motion adapter (mean action): mean task reward = %f, mean total tracking reward = %f, mean hand tracking reward = %f, mean object tracking reward = %f" % (score[1][0], score[1][4], score[1][8], score[1][9]))
+        print("KODex with motion adapter (noisy action): mean task reward = %f, mean total tracking reward = %f, mean hand tracking reward = %f, mean object tracking reward = %f" % (score[2][0], score[2][4], score[2][8], score[2][9]))
+        if Save_fig:
+            root_dir = os.getcwd() + "/" + args.policy[:args.policy.find('.')]
+            if not os.path.exists(root_dir):
+                os.mkdir(root_dir)
+            hammer_compare_index, MA_PD_plam_pos, PD_plam_pos, Joint_adaptations, PD_hit_pos, MA_hit_pos, PD_hit_force, MA_hit_force = height_values
+            # post-process the data
+            # plot a hist gram
+            print(len(PD_hit_pos))
+            print(len(MA_hit_pos))
+            for z in range(2):
+                if z == 0:
+                    scatter_PD = np.zeros([len(PD_hit_pos)])
+                    scatter_MA = np.zeros([len(MA_hit_pos)])
+                    for i in range(len(PD_hit_pos)):
+                        x = PD_hit_pos[i][0]
+                        y = PD_hit_pos[i][1]
+                        zz = PD_hit_pos[i][2]
+                        scatter_PD[i] = np.sqrt(x ** 2 + y ** 2 + zz ** 2)
+                    for i in range(len(MA_hit_pos)):
+                        x = MA_hit_pos[i][0]
+                        y = MA_hit_pos[i][1]
+                        zz = MA_hit_pos[i][2]
+                        scatter_MA[i] = np.sqrt(x ** 2 + y ** 2 + zz ** 2)
+                    scale = 1000
+                elif z == 1:
+                    scatter_PD = np.zeros([len(PD_hit_force)])
+                    scatter_MA = np.zeros([len(MA_hit_force)])
+                    for i in range(len(PD_hit_force)):
+                        scatter_PD[i] = PD_hit_force[i]
+                    for i in range(len(MA_hit_force)):
+                        scatter_MA[i] = MA_hit_force[i]
+                    scale = 1
+                plt.figure(z)
+                fig, ax = plt.subplots()
+                num_bins = 40
+                n, bins, patches = ax.hist(scatter_MA * scale, num_bins, color='purple', alpha=0.7, label="CIMER")
+                mu = np.mean(scatter_MA * scale)
+                sigma = np.std(scatter_MA * scale)
+                y = ((1 / (np.sqrt(2 * np.pi) * sigma)) *
+                    np.exp(-0.5 * (1 / sigma * (bins - mu))**2)) 
+                aaa = np.histogram(scatter_MA, num_bins)
+                y = y / max(y) * max(aaa[0])
+                # plt.plot(bins, y, '--', color ='purple')
+                n, bins, patches = ax.hist(scatter_PD * scale, num_bins, color='b', alpha=0.7, label="Motion Gen. + PD")
+                mu = np.mean(scatter_PD * scale)
+                sigma = np.std(scatter_PD * scale)
+                y = ((1 / (np.sqrt(2 * np.pi) * sigma)) *
+                    np.exp(-0.5 * (1 / sigma * (bins - mu))**2))
+                a = np.histogram(scatter_PD, num_bins)
+                y = y / max(y) * max(a[0])
+                # plt.plot(bins, y, '--', color ='b')
+                # ax.legend(loc="upper right")
+                if z == 0:
+                    ax.set_ylim([0, 1.2 * max(max(a[0]), max(aaa[0]))])
+                    ax.set_xlim([0.8 * min(min(scatter_MA * scale), min(scatter_PD * scale)), 1.1 * max(max(scatter_MA * scale), max(scatter_PD * scale))])
+                elif z == 1:
+                    ax.set_ylim([0, 1.2 * max(max(a[0]), max(aaa[0]))])
+                    ax.set_xlim([0.8 * min(min(scatter_PD * scale), min(scatter_MA * scale)), 1.1 * max(max(scatter_MA * scale), max(scatter_PD * scale))])
+                ax.grid(True)
+                if z == 0:
+                    # fig.suptitle("Changes of Contact Point", fontsize=22)
+                    fig.supxlabel('Distance from contact point to center', fontsize=18)
+                    fig.supylabel('Occurrence', fontsize=20)
+                    # legend = plt.legend(fontsize=18)
+                    ax.tick_params(axis='both', labelsize=16)
+                    # frame = legend.get_frame()
+                    # frame.set_facecolor('0.9')
+                    # frame.set_edgecolor('0.9')
+                    plt.tight_layout()
+                    plt.savefig(root_dir + '/%s.png'%("hit_location"))
+                    plt.close()
+                elif z == 1:
+                    # fig.suptitle("Changes of Contact Force", fontsize=22)
+                    fig.supxlabel('Contact Force', fontsize=18)
+                    fig.supylabel('Occurrence', fontsize=20)
+                    # legend = plt.legend(fontsize=18)
+                    ax.tick_params(axis='both', labelsize=16)
+                    # frame = legend.get_frame()
+                    # frame.set_facecolor('0.9')
+                    # frame.set_edgecolor('0.9')
+                    plt.tight_layout()
+                    plt.savefig(root_dir + '/%s.png'%("contact_force"))
+                    plt.close()
+            ''' old visulization codes
+            all_index = [i for i in range(len(Eval_data))]
+            hammer_compare_index = all_index # compare the performance across all samples
+            Joint_changes = np.zeros([num_robot_s, task_horizon - 1])
+            # Joints_name = {"Base":["A_ARRx", "A_ARRy"], "Wrist":["A_WRJ1", "A_WRJ0"], "Forefinger":["A_FFJ3", "A_FFJ2", "A_FFJ1", "A_FFJ0"], "MiddleFinger":["A_MFJ3", "A_MFJ2", "A_MFJ1", "A_MFJ0"], "RingFinger":["A_RFJ3", "A_RFJ2", "A_RFJ1", "A_RFJ0"], "LittleFinger":["A_LFJ4", "A_LFJ3", "A_LFJ2", "A_LFJ1", "A_LFJ0"], "Thumb":["A_THJ4", "A_THJ3", "A_THJ2", "A_THJ1", "A_THJ0"]}
+            Joints_name = {"Base":["Rx", "Ry"], "Wrist":["WRJ1", "WRJ0"], "Forefinger":["FFJ3", "FFJ2", "FFJ1", "FFJ0"], "MiddleFinger":["MFJ3", "MFJ2", "MFJ1", "MFJ0"], "RingFinger":["RFJ3", "RFJ2", "RFJ1", "RFJ0"], "LittleFinger":["LFJ4", "LFJ3", "LFJ2", "LFJ1", "LFJ0"], "Thumb":["THJ4", "THJ3", "THJ2", "THJ1", "THJ0"]}
+            for i in range(len(hammer_compare_index)):
+                for j in range(len(Joint_adaptations[hammer_compare_index[i]])):
+                    Joint_changes[:, j] += Joint_adaptations[hammer_compare_index[i]][j] / len(hammer_compare_index)
+            finger_index = 0
+            for i  in range(len(Joints_name.keys())):
+                body_type = list(Joints_name.keys())[i]
+                if body_type not in {"Wrist", "Base"}:  # Wrist only has two parts, so one row is enough
+                    plt.figure(i)
+                    fig, ax = plt.subplots(2, 3)
+                    for j in range(len(Joints_name[body_type])):
+                        ax[j // 3 , j % 3].plot(Joint_changes[finger_index], linewidth=1, color='#B22400')
+                        # ax[j // 3 , j % 3].vlines(11, 1.1 * min(Joint_changes[finger_index]), 1.1 * max(Joint_changes[finger_index]), linestyles='dotted', colors='k')
+                        ax[j // 3 , j % 3].set_ylim([1.1 * min(Joint_changes[finger_index]), 1.1 * max(Joint_changes[finger_index])])
+                        ax[j // 3 , j % 3].set(title=Joints_name[body_type][j])
+                        finger_index += 1
+                        # fig.legend(['Differences of joint targets (%s) made by MA'%(body_type)], loc='lower left')
+                        # fig.legend(['Joint '], loc='lower left')
+                        fig.supxlabel('Time step')
+                        fig.supylabel('Differences of joint targets')
+                        ax[j // 3 , j % 3].grid()
+                else:
+                    plt.figure(i)
+                    fig, ax = plt.subplots(1, 2)
+                    for j in range(2):
+                        ax[j % 2].plot(Joint_changes[finger_index], linewidth=1, color='#B22400')
+                        # ax[j % 2].vlines(11, 1.1 * min(Joint_changes[finger_index]), 1.1 * max(Joint_changes[finger_index]), linestyles='dotted', colors='k')
+                        ax[j % 2].set_ylim([1.1 * min(Joint_changes[finger_index]), 1.1 * max(Joint_changes[finger_index])])
+                        ax[j % 2].set(title=Joints_name[body_type][j])
+                        finger_index += 1
+                        # fig.legend(['Differences of joint targets (%s) made by MA'%(body_type)], loc='lower left')
+                        fig.supxlabel('Time step')
+                        fig.supylabel('Differences of joint targets')
+                        ax[j % 2].grid()
+                plt.tight_layout()
+                plt.savefig(root_dir + '/%s.png'%(body_type))
+                plt.close()
+            # all_index = [i for i in range(len(Eval_data))]
+            # hammer_compare_index = all_index # compare the performance across all samples
+            MA_PD_all_height = np.zeros(task_horizon - 1, )
+            PD_all_height = np.zeros(task_horizon - 1)
+            ours_all_height = np.zeros([task_horizon - 1, len(hammer_compare_index)])
+            KODex_PD_all_height = np.zeros([task_horizon - 1, len(hammer_compare_index)])
+            for i in range(len(hammer_compare_index)):
+                plt.figure(i)
+                fig, ax = plt.subplots()
+                index_ = 0
+                for item1, item2 in zip(MA_PD_plam_pos[hammer_compare_index[i]], PD_plam_pos[hammer_compare_index[i]]):
+                    MA_PD_all_height[index_] += item1 / len(hammer_compare_index)
+                    PD_all_height[index_] += item2 / len(hammer_compare_index)
+                    ours_all_height[index_, i] = item1
+                    KODex_PD_all_height[index_, i] = item2
+                    index_ += 1
+                ax.plot(MA_PD_plam_pos[hammer_compare_index[i]], linewidth=1, color='#B22400')
+                ax.plot(PD_plam_pos[hammer_compare_index[i]], linewidth=1, color='#F22BB2')
+                vis_min = min(min(MA_PD_plam_pos[hammer_compare_index[i]]), min(PD_plam_pos[hammer_compare_index[i]]))
+                vis_max = max(max(MA_PD_plam_pos[hammer_compare_index[i]]), max(PD_plam_pos[hammer_compare_index[i]]))
+                ax.vlines(11, 1.1 * vis_min, 1.1 * vis_max, linestyles='dotted', colors='k')  # around 11 iter, the hand grasps the hammer
+                ax.set_ylim([1.1 * vis_min, 1.1 * vis_max])
+                ax.set(title="plam_height - nail_height(index:" + str(hammer_compare_index[i]) + ")")
+                fig.legend(['MA_PD', 'PD'], loc='lower left')
+                fig.supxlabel('Time step')
+                fig.supylabel('Height Difference')
+                plt.tight_layout()
+                plt.savefig(root_dir + '/height_diff_' + str(hammer_compare_index[i]) + '.png')
+                plt.close()
+            x_simu = np.arange(0, ours_all_height.shape[0])
+            plt.figure(200)
+            plt.axes(frameon=0)
+            plt.grid()
+            mean_ours, std_ours = np.mean(ours_all_height, axis = 1), np.std(ours_all_height, axis=1)
+            mean_kodex_pd, std_kodex_pd = np.mean(KODex_PD_all_height, axis = 1), np.std(KODex_PD_all_height, axis=1)
+            plt.plot(x_simu, mean_ours, linewidth=2, label = 'KODex + Motion Adapter + PD', color='#B22400')
+            plt.fill_between(x_simu, mean_ours - std_ours, mean_ours + std_ours, alpha = 0.15, linewidth = 0, color='#B22400')
+            plt.plot(x_simu, mean_kodex_pd, linewidth=2, label = 'KODex + PD', color='#006BB2')
+            plt.fill_between(x_simu, mean_kodex_pd - std_kodex_pd, mean_kodex_pd + std_kodex_pd, alpha = 0.15, linewidth = 0, color='#006BB2')
+            plt.vlines(23, -0.15, 0.05, linestyles='dotted', colors='k')  # around 11 iter, the hand grasps the hammer
+            plt.xlabel('Time step', fontsize=12)
+            plt.ylabel('Palm height - Nail height', fontsize=12)
+            legend = plt.legend(fontsize=12)
+            frame = legend.get_frame()
+            frame.set_facecolor('0.9')
+            frame.set_edgecolor('0.9')
+            plt.tight_layout()
+            plt.savefig(root_dir + '/all_height.png')
+            '''
+    elif task_id == 'relocate':
+        score, force_values = e.evaluate_trained_policy(Eval_data, Simple_PID, coeffcients, Koopman_obser, KODex, task_horizon, job_data['future_s'], job_data['history_s'], policy, num_episodes=len(demos), gamma = gamma, obj_dynamics = job_data['obj_dynamics'], visual = visualize)  # noise-free actions
+        # score[0][0] -> mean sum rewards for rollout (task-specific rewards)
+        # because we are now in evaluation mode, the reward/score here is the sum of gamma_discounted rewards at t=0 (the sum rewards at other states at t=1,..,T are ignored) 
+        # In other words, this can be seen as the reward in the domain of trajectory.
+        print("(gamma = %f)\n KODex with PD: mean task reward = %f, mean total tracking reward = %f, mean hand tracking reward = %f, mean object tracking reward = %f" % (gamma, score[0][0], score[0][4], score[0][8], score[0][9]))
+        print("KODex with motion adapter (mean action): mean task reward = %f, mean total tracking reward = %f, mean hand tracking reward = %f, mean object tracking reward = %f" % (score[1][0], score[1][4], score[1][8], score[1][9]))
+        print("KODex with motion adapter (noisy action): mean task reward = %f, mean total tracking reward = %f, mean hand tracking reward = %f, mean object tracking reward = %f" % (score[2][0], score[2][4], score[2][8], score[2][9]))
+        if Save_fig:
+            root_dir = os.getcwd() + "/" + args.policy[:args.policy.find('.')]
+            if not os.path.exists(root_dir):
+                os.mkdir(root_dir)
+            force_compare_index, MA_PD_tips_force, PD_tips_force, Joint_adaptations = force_values
+            all_index = [i for i in range(len(Eval_data))]
+            force_compare_index = all_index # compare the performance across all samples
+            Joint_changes = np.zeros([num_robot_s, task_horizon - 1])
+            Joints_name = {"Base":["A_ARTx", "A_ARTy", "A_ARTz", "A_ARRx", "A_ARRy", "A_ARRz"], "Wrist":["A_WRJ1", "A_WRJ0"], "Forefinger":["A_FFJ3", "A_FFJ2", "A_FFJ1", "A_FFJ0"], "MiddleFinger":["A_MFJ3", "A_MFJ2", "A_MFJ1", "A_MFJ0"], "RingFinger":["A_RFJ3", "A_RFJ2", "A_RFJ1", "A_RFJ0"], "LittleFinger":["A_LFJ4", "A_LFJ3", "A_LFJ2", "A_LFJ1", "A_LFJ0"], "Thumb":["A_THJ4", "A_THJ3", "A_THJ2", "A_THJ1", "A_THJ0"]}
+            for i in range(len(force_compare_index)):
+                for j in range(len(Joint_adaptations[force_compare_index[i]])):
+                    Joint_changes[:, j] += Joint_adaptations[force_compare_index[i]][j] / len(force_compare_index)
+            finger_index = 0
+            for i in range(len(Joints_name.keys())):
+                body_type = list(Joints_name.keys())[i]
+                if body_type != "Wrist":  # Wrist only has two parts, so one row is enough
+                    plt.figure(i)
+                    fig, ax = plt.subplots(2, 3)
+                    for j in range(len(Joints_name[body_type])):
+                        ax[j // 3 , j % 3].plot(Joint_changes[finger_index], linewidth=1, color='#B22400')
+                        ax[j // 3 , j % 3].vlines(22, 1.1 * min(Joint_changes[finger_index]), 1.1 * max(Joint_changes[finger_index]), linestyles='dotted', colors='k')
+                        ax[j // 3 , j % 3].set_ylim([1.1 * min(Joint_changes[finger_index]), 1.1 * max(Joint_changes[finger_index])])
+                        ax[j // 3 , j % 3].set(title=Joints_name[body_type][j])
+                        finger_index += 1
+                        fig.legend(['Differences of joint targets (%s) made by MA'%(body_type)], loc='lower left')
+                        fig.supxlabel('Time step')
+                        fig.supylabel('Differences of joint targets')
+                else:
+                    plt.figure(i)
+                    fig, ax = plt.subplots(1, 2)
+                    for j in range(2):
+                        ax[j % 2].plot(Joint_changes[finger_index], linewidth=1, color='#B22400')
+                        ax[j % 2].vlines(22, 1.1 * min(Joint_changes[finger_index]), 1.1 * max(Joint_changes[finger_index]), linestyles='dotted', colors='k')
+                        ax[j % 2].set_ylim([1.1 * min(Joint_changes[finger_index]), 1.1 * max(Joint_changes[finger_index])])
+                        ax[j % 2].set(title=Joints_name[body_type][j])
+                        finger_index += 1
+                        fig.legend(['Differences of joint targets (%s) made by MA'%(body_type)], loc='lower left')
+                        fig.supxlabel('Time step')
+                        fig.supylabel('Differences of joint targets')
+                plt.tight_layout()
+                plt.savefig(root_dir + '/%s.png'%(body_type))
+                plt.close()
+            # all_index = [i for i in range(len(Eval_data))]
+            # force_compare_index = all_index # compare the performance across all samples
+            finger_index = ['ff', 'mf', 'rf', 'lf', 'th', 'sum']
+            finger_index_vis = ['Forefinger', 'Middlefinger', 'Ringfinger', 'Littlefinger', 'Thumb', 'Sum']
+            MA_PD_total_force = {'ff': np.zeros(task_horizon - 1), 'mf': np.zeros(task_horizon - 1), 'rf': np.zeros(task_horizon - 1), 'lf': np.zeros(task_horizon - 1), 'th': np.zeros(task_horizon - 1), 'sum': np.zeros(task_horizon - 1)}
+            PD_total_force = {'ff': np.zeros(task_horizon - 1), 'mf': np.zeros(task_horizon - 1), 'rf': np.zeros(task_horizon - 1), 'lf': np.zeros(task_horizon - 1), 'th': np.zeros(task_horizon - 1), 'sum': np.zeros(task_horizon - 1)}
+            MA_PD_PD_ratio = {'ff': np.zeros(task_horizon - 1), 'mf': np.zeros(task_horizon - 1), 'rf': np.zeros(task_horizon - 1), 'lf': np.zeros(task_horizon - 1), 'th': np.zeros(task_horizon - 1), 'sum': np.zeros(task_horizon - 1)}
+            # additional visualization codes
+            ours_all_force = {'ff': np.zeros([task_horizon - 1, len(force_compare_index)]), 'mf': np.zeros([task_horizon - 1, len(force_compare_index)]), 'rf': np.zeros([task_horizon - 1, len(force_compare_index)]), 'lf': np.zeros([task_horizon - 1, len(force_compare_index)]), 'th': np.zeros([task_horizon - 1, len(force_compare_index)]), 'sum': np.zeros([task_horizon - 1, len(force_compare_index)])}
+            KODex_PD_all_force = {'ff': np.zeros([task_horizon - 1, len(force_compare_index)]), 'mf': np.zeros([task_horizon - 1, len(force_compare_index)]), 'rf': np.zeros([task_horizon - 1, len(force_compare_index)]), 'lf': np.zeros([task_horizon - 1, len(force_compare_index)]), 'th': np.zeros([task_horizon - 1, len(force_compare_index)]), 'sum': np.zeros([task_horizon - 1, len(force_compare_index)])}
+            ours_KODex_PD_all_force = {'ff': np.zeros([task_horizon - 1, len(force_compare_index)]), 'mf': np.zeros([task_horizon - 1, len(force_compare_index)]), 'rf': np.zeros([task_horizon - 1, len(force_compare_index)]), 'lf': np.zeros([task_horizon - 1, len(force_compare_index)]), 'th': np.zeros([task_horizon - 1, len(force_compare_index)]), 'sum': np.zeros([task_horizon - 1, len(force_compare_index)])}
+            # additional visualization codes
+            for i in range(len(force_compare_index)):
+                plt.figure(i)
+                fig, ax = plt.subplots(2, 3)
+                for row in range(2):
+                    for col in range(3):
+                        tmp_length = len(MA_PD_tips_force[finger_index[3*row+col]][force_compare_index[i]])  # -> a list through time horizon
+                        MA_PD_minus_PD = list()
+                        index_ = 0
+                        for item1, item2 in zip(MA_PD_tips_force[finger_index[3*row+col]][force_compare_index[i]], PD_tips_force[finger_index[3*row+col]][force_compare_index[i]][:tmp_length]):
+                            MA_PD_total_force[finger_index[3*row+col]][index_] += item1 / len(force_compare_index)
+                            PD_total_force[finger_index[3*row+col]][index_] += item2 / len(force_compare_index)
+                            # additional visualization codes
+                            ours_all_force[finger_index[3*row+col]][index_, i] += item1 
+                            KODex_PD_all_force[finger_index[3*row+col]][index_, i] += item2 
+                            if item1 / (item2 + 1e-8) > 5:
+                                ours_KODex_PD_all_force[finger_index[3*row+col]][index_, i] = 5  
+                            else:
+                                ours_KODex_PD_all_force[finger_index[3*row+col]][index_, i] = item1 / (item2 + 1e-8)
+                            # additional visualization codes
+                            MA_PD_minus_PD.append(item1 - item2)
+                            index_ += 1
+                        ax[row, col].plot(MA_PD_minus_PD, linewidth=1, color='#B22400')
+                        # ax[row, col].plot(PD_tips_force[finger_index[3*row+col]][force_compare_index[i]], linewidth=1, color='#F22BB2')
+                        ax[row, col].vlines(22, 1.1 * min(MA_PD_minus_PD), 1.1 * max(MA_PD_minus_PD), linestyles='dotted', colors='k')
+                        ax[row, col].set_ylim([1.1 * min(MA_PD_minus_PD), 1.1 * max(MA_PD_minus_PD)])
+                        ax[row, col].set(title=finger_index[3*row+col])
+                        # ax[row, col].legend()
+                fig.legend(['MA_PD - PD (larger the value, fingertips are closer to the object)'], loc='lower left')
+                fig.supxlabel('Time step')
+                fig.supylabel('Difference of touch sensor feedback')
+                plt.tight_layout()
+                plt.savefig(root_dir + '/touch_sensor_' + str(force_compare_index[i]) + '.png')
+                plt.close()
 
-def find_all_episodes(video_path):
-    """Find all episode files for a given video path"""
-    pattern = f"{video_path}_actions_ep*.npy"
-    action_files = glob.glob(pattern)
-    episode_indices = []
-    for f in action_files:
-        try:
-            # Extract episode number from filename
-            ep_str = f.split('_ep')[-1].replace('.npy', '')
-            episode_indices.append(int(ep_str))
-        except:
-            continue
-    return sorted(episode_indices)
+            for finger_ in finger_index:
+                for i in range(task_horizon - 1):
+                    if MA_PD_total_force[finger_][i] / (PD_total_force[finger_][i] + 1e-8) > 5:
+                        MA_PD_PD_ratio[finger_][i] = 5
+                    else:
+                        MA_PD_PD_ratio[finger_][i] = MA_PD_total_force[finger_][i] / (PD_total_force[finger_][i] + 1e-8)
+                    
+            # plt.figure(1)
+            # fig, ax = plt.subplots(2, 3)
+            # for row in range(2):
+            #     for col in range(3):
+            #         ax[row, col].plot(MA_PD_PD_ratio[finger_index[3*row+col]], linewidth=1, color='#B22400')
+            #         ax[row, col].set(title=finger_index_vis[3*row+col])
+            #         ax[row, col].vlines(22, 0, 1.1 * max(MA_PD_PD_ratio[finger_index[3*row+col]]), linestyles='dotted', colors='k')
+            # fig.legend(['Ratio of MA_PD over PD (max: 5)'], loc='lower left')
+            # plt.tight_layout()
+            # plt.savefig(root_dir + '/ratio.png')
 
-def main():
-    parser = argparse.ArgumentParser(description='Visualize CIMER trajectory data from policy evaluation')
-    parser.add_argument('--video_path', type=str, required=True,
-                       help='Base path to video files (without episode suffix)')
-    parser.add_argument('--episode', type=int, default=0,
-                       help='Episode index to visualize (default: 0)')
-    parser.add_argument('--task', type=str, required=True,
-                       choices=['pen', 'relocate', 'door', 'hammer'],
-                       help='Task name')
-    parser.add_argument('--output_dir', type=str, default='./trajectory_plots',
-                       help='Directory to save visualization plots')
-    parser.add_argument('--create_animation', action='store_true',
-                       help='Create animated trajectory visualization (requires ffmpeg)')
-    parser.add_argument('--all_episodes', action='store_true',
-                       help='Visualize all available episodes')
-    
-    args = parser.parse_args()
-    
-    # Create output directory
-    os.makedirs(args.output_dir, exist_ok=True)
-    
-    print(f"\n{'='*60}")
-    print(f"CIMER Trajectory Visualization")
-    print(f"{'='*60}")
-    print(f"Task: {args.task.upper()}")
-    print(f"Video path: {args.video_path}")
-    print(f"Output directory: {args.output_dir}")
-    print(f"{'='*60}\n")
-    
-    if args.all_episodes:
-        # Find all episodes
-        episode_indices = find_all_episodes(args.video_path)
-        
-        if not episode_indices:
-            print(f"❌ No episode files found matching pattern: {args.video_path}_actions_ep*.npy")
-            return
-        
-        print(f"📊 Found {len(episode_indices)} episodes: {episode_indices}\n")
-        
-        for episode_idx in episode_indices:
-            print(f"{'─'*60}")
-            print(f"Processing Episode {episode_idx}...")
-            print(f"{'─'*60}")
-            
-            try:
-                # Load trajectory data
-                actions, target_positions, target_velocities = load_trajectory_data(
-                    args.video_path, episode_idx
-                )
-                
-                print(f"  ✓ Actions shape: {actions.shape}")
-                print(f"  ✓ Target positions shape: {target_positions.shape}")
-                print(f"  ✓ Target velocities shape: {target_velocities.shape}")
-                
-                # Create static plots
-                plot_output = os.path.join(args.output_dir, 
-                                          f'{args.task}_ep{episode_idx}_trajectories.png')
-                create_trajectory_plots(actions, target_positions, target_velocities, 
-                                       plot_output, args.task.capitalize(), episode_idx)
-                
-                # Create heatmap
-                heatmap_output = os.path.join(args.output_dir,
-                                             f'{args.task}_ep{episode_idx}_heatmap.png')
-                create_heatmap_visualization(actions, target_positions, 
-                                            heatmap_output, args.task.capitalize(), episode_idx)
-                
-                # Create animation if requested
-                if args.create_animation:
-                    anim_output = os.path.join(args.output_dir,
-                                              f'{args.task}_ep{episode_idx}_animation.mp4')
-                    create_animated_trajectory(actions, target_positions, 
-                                              anim_output, args.task.capitalize(), episode_idx)
-                
-                print(f"  ✓ Episode {episode_idx} complete\n")
-                
-            except Exception as e:
-                print(f"  ❌ Error processing episode {episode_idx}: {e}\n")
-                continue
-        
-        print(f"\n{'='*60}")
-        print(f"✅ Processed {len(episode_indices)} episodes")
-        print(f"📁 All outputs saved to: {args.output_dir}")
-        print(f"{'='*60}\n")
-    
+            # additional visualization codes
+            plt.figure(2) # plot values 
+            fig, ax = plt.subplots(2, 3)
+            for row in range(2):
+                for col in range(3):
+                    x_simu = np.arange(0, ours_all_force[finger_index[3*row+col]].shape[0])
+                    low_ours, mid_ours, high_ours = np.percentile(ours_all_force[finger_index[3*row+col]], [25, 50, 75], axis=1)
+                    low_kodex_pd, mid_kodex_pd, high_kodex_pd = np.percentile(KODex_PD_all_force[finger_index[3*row+col]], [25, 50, 75], axis=1)
+                    mean_ours, std_ours = np.mean(ours_all_force[finger_index[3*row+col]], axis = 1), np.std(ours_all_force[finger_index[3*row+col]], axis=1)
+                    mean_kodex_pd, std_kodex_pd = np.mean(KODex_PD_all_force[finger_index[3*row+col]], axis = 1), np.std(KODex_PD_all_force[finger_index[3*row+col]], axis=1)
+                    ax[row, col].plot(x_simu, mean_ours, linewidth = 2, label = 'CIMER', color='purple')
+                    ax[row, col].fill_between(x_simu, mean_ours - std_ours, mean_ours + std_ours, alpha = 0.15, linewidth = 0, color='purple')
+                    ax[row, col].plot(x_simu, mean_kodex_pd, linewidth = 2, label = 'Imitator + PD', color='b')
+                    ax[row, col].fill_between(x_simu, mean_kodex_pd - std_kodex_pd, mean_kodex_pd + std_kodex_pd, alpha = 0.15, linewidth = 0, color='b')
+                    ax[row, col].set(title=finger_index_vis[3*row+col])
+                    ax[row, col].grid()
+                    ax[row, col].tick_params(axis='both', labelsize=16)
+            # fig.suptitle("Changes of Grasping Force", fontsize=22)
+            fig.supxlabel('Time Step', fontsize=20)
+            fig.supylabel('Grasping Force', fontsize=20)
+            # legend = fig.legend(fontsize=10, loc='lower left')
+            # legend = ax[row, col].legend()
+                    # ax[row, col].vlines(22, 0, 1.1 * max(MA_PD_PD_ratio[finger_index[3*row+col]]), linestyles='dotted', colors='k')
+            # fig.legend(['Ratio of MA_PD over PD (max: 5)'], loc='lower left')
+            plt.tight_layout()
+            plt.savefig(root_dir + '/values.png')
+
+            # plt.figure(3)  # plot ratios
+            # fig, ax = plt.subplots(2, 3)
+            # for row in range(2):
+            #     for col in range(3):
+            #         x_simu = np.arange(0, ours_KODex_PD_all_force[finger_index[3*row+col]].shape[0])
+            #         mean_ratio, std_ratio = np.mean(ours_KODex_PD_all_force[finger_index[3*row+col]], axis = 1), np.std(ours_KODex_PD_all_force[finger_index[3*row+col]], axis=1)
+            #         ax[row, col].plot(x_simu, mean_ratio, linewidth = 2, label = 'Ratio', color='#B22400')
+            #         ax[row, col].fill_between(x_simu, mean_ratio - std_ratio, mean_ratio + std_ratio, alpha = 0.15, linewidth = 0, color='#B22400')
+            #         ax[row, col].set(title=finger_index_vis[3*row+col])
+            #         ax[row, col].grid()
+            #         # legend = ax[row, col].legend()
+            #         # ax[row, col].vlines(22, 0, 1.1 * max(MA_PD_PD_ratio[finger_index[3*row+col]]), linestyles='dotted', colors='k')
+            # # fig.legend(['Ratio of MA_PD over PD (max: 5)'], loc='lower left')
+            # plt.tight_layout()
+            # plt.savefig(root_dir + '/ratio_new.png')
+
+            # for finger_ in finger_index: # plot individual values 
+            #     x_simu = np.arange(0, ours_all_force[finger_].shape[0])
+            #     plt.figure(10)
+            #     plt.axes(frameon=0)
+            #     mean_ours, std_ours = np.mean(ours_all_force[finger_], axis = 1), np.std(ours_all_force[finger_], axis=1)
+            #     mean_kodex_pd, std_kodex_pd = np.mean(KODex_PD_all_force[finger_], axis = 1), np.std(KODex_PD_all_force[finger_], axis=1)
+            #     plt.plot(x_simu, mean_ours, linewidth=2, label = 'KODex + Motion Adapter + PD', color='#B22400')
+            #     plt.fill_between(x_simu, mean_ours - std_ours, mean_ours + std_ours, alpha = 0.15, linewidth = 0, color='#B22400')
+            #     plt.plot(x_simu, mean_kodex_pd, linewidth=2, label = 'KODex + PD', color='#006BB2')
+            #     plt.fill_between(x_simu, mean_kodex_pd - std_kodex_pd, mean_kodex_pd + std_kodex_pd, alpha = 0.15, linewidth = 0, color='#006BB2')
+            #     vis_min = min(min(mean_ours - std_ours), min(mean_kodex_pd - std_kodex_pd))
+            #     vis_max = max(max(mean_ours + std_ours), max(mean_kodex_pd + std_kodex_pd))
+            #     plt.vlines(25, vis_min, vis_max, linestyles='dotted', colors='k')  # denote the grasping process
+            #     plt.vlines(33, vis_min, vis_max, linestyles='dotted', colors='k')  
+            #     plt.grid()
+            #     plt.xlabel('Time step', fontsize=12)
+            #     plt.ylabel('Touch Sensor Feedback', fontsize=12)
+            #     # legend = plt.legend(fontsize=12)
+            #     # frame = legend.get_frame()
+            #     # frame.set_facecolor('0.9')
+            #     # frame.set_edgecolor('0.9')
+            #     plt.tight_layout()
+            #     plt.savefig(root_dir + '/value_%s.png'%(finger_))
+            #     plt.close()
+
+            # for finger_ in finger_index: # plot individual ratios 
+            #     x_simu = np.arange(0, ours_KODex_PD_all_force[finger_].shape[0])
+            #     plt.figure(11)
+            #     plt.axes(frameon=0)
+            #     mean_ours, std_ours = np.mean(ours_KODex_PD_all_force[finger_], axis = 1), np.std(ours_KODex_PD_all_force[finger_], axis=1)
+            #     plt.plot(x_simu, mean_ours, linewidth=2, label = 'Ratio', color='#B22400')
+            #     plt.fill_between(x_simu, mean_ours - std_ours, mean_ours + std_ours, alpha = 0.15, linewidth = 0, color='#B22400')
+            #     vis_min = min(mean_ours - std_ours)
+            #     vis_max = max(mean_ours + std_ours)
+            #     plt.vlines(25, vis_min, vis_max, linestyles='dotted', colors='k')  # denote the grasping process
+            #     plt.vlines(33, vis_min, vis_max, linestyles='dotted', colors='k')  
+            #     plt.grid()
+            #     plt.xlabel('Time step', fontsize=12)
+            #     plt.ylabel('Touch Feedback Ratio', fontsize=12)
+            #     legend = plt.legend(fontsize=12)
+            #     # frame = legend.get_frame()
+            #     # frame.set_facecolor('0.9')
+            #     # frame.set_edgecolor('0.9')
+            #     plt.tight_layout()
+            #     plt.savefig(root_dir + '/ratio_new_%s.png'%(finger_))
+            #     plt.close()
+else:  # Only_record_video
+    if task_id == 'relocate':
+        e.Visualze_CIMER_policy(Eval_data, Simple_PID, coeffcients, Koopman_obser, KODex, task_horizon, job_data['future_s'], job_data['history_s'], policy, num_episodes=len(demos), gamma = gamma, obj_dynamics = job_data['obj_dynamics'], visual = visualize, object_name = job_data['object'])  # noise-free actions
     else:
-        # Visualize single episode
-        print(f"Processing Episode {args.episode}...\n")
-        
-        try:
-            # Load trajectory data
-            actions, target_positions, target_velocities = load_trajectory_data(
-                args.video_path, args.episode
-            )
-            
-            print(f"✓ Actions shape: {actions.shape}")
-            print(f"✓ Target positions shape: {target_positions.shape}")
-            print(f"✓ Target velocities shape: {target_velocities.shape}\n")
-            
-            # Create static plots
-            plot_output = os.path.join(args.output_dir, 
-                                      f'{args.task}_ep{args.episode}_trajectories.png')
-            create_trajectory_plots(actions, target_positions, target_velocities, 
-                                   plot_output, args.task.capitalize(), args.episode)
-            
-            # Create heatmap
-            heatmap_output = os.path.join(args.output_dir,
-                                         f'{args.task}_ep{args.episode}_heatmap.png')
-            create_heatmap_visualization(actions, target_positions, 
-                                        heatmap_output, args.task.capitalize(), args.episode)
-            
-            # Create animation if requested
-            if args.create_animation:
-                anim_output = os.path.join(args.output_dir,
-                                          f'{args.task}_ep{args.episode}_animation.mp4')
-                create_animated_trajectory(actions, target_positions, 
-                                          anim_output, args.task.capitalize(), args.episode)
-            
-            print(f"\n{'='*60}")
-            print(f"✅ Visualization complete!")
-            print(f"📁 Check {args.output_dir} for outputs")
-            print(f"{'='*60}\n")
-            
-        except FileNotFoundError as e:
-            print(f"❌ Error: Could not find trajectory files for episode {args.episode}")
-            print(f"   Expected files like: {args.video_path}_actions_ep{args.episode}.npy")
-            print(f"   {e}\n")
-        except Exception as e:
-            print(f"❌ Error during visualization: {e}")
-            import traceback
-            traceback.print_exc()
-
-if __name__ == '__main__':
-    main()
+        e.Visualze_CIMER_policy(Eval_data, Simple_PID, coeffcients, Koopman_obser, KODex, task_horizon, job_data['future_s'], job_data['history_s'], policy, num_episodes=len(demos), gamma = gamma, obj_dynamics = job_data['obj_dynamics'], visual = visualize)  # noise-free actions        
