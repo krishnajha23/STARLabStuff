@@ -4111,14 +4111,15 @@ class GymEnv(object):
                         num_episodes=5,
                         obj_dynamics=True,
                         gamma=1,
-                        visual=False,
+                        visual=True,
                         object_name='',
                         terminate_at_done=True,
                         seed=123,
-                        record_video=False,
-                        save_frames=False,
+                        record_video=True,
+                        save_frames=True,
                     camera_name='vil_camera'):
         self.set_seed(seed)
+        print(f"[DEBUG START] record_video={record_video}, save_frames={save_frames}, visual={visual}")
         task = self.env_id.split('-')[0]
         num_future_s = len(future_state)
         save_path = os.path.join(os.getcwd(), 'Videos', task, object_name)[:-1] + '_CIMER.mp4'
@@ -4199,23 +4200,31 @@ class GymEnv(object):
                 if visual:
                     print("Episode %d, KOdex with motion adapter (mean action)." %(ep + 1))
                 while t < task_horizon - 1 and obj_height > -0.05 :  # what would be early-termination for relocation task?
+                    print(f"[DEBUG] t={t}, visual={visual}, record_video={record_video}, save_frames={save_frames}")
                     if visual or record_video or save_frames:
                         self.render() if visual else None
+                        print(f"[DEBUG] Attempting to render frame {t}")
                         frame = self.env.sim.render(640, 480, camera_name=camera_name)
+                        print(f"[DEBUG] Frame shape: {frame.shape}")
                         frame = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
                         
                         if save_frames:
-                            cv2.imwrite(f'Frames/hammer_ep{ep:03d}_frame{t:04d}.png', frame)
+                            frame_path = f'Frames/hammer_ep{ep:03d}_frame{t:04d}.png'
+                            cv2.imwrite(frame_path, frame)
+                            print(f"[DEBUG] Saved frame: {frame_path}")
                         
                         if record_video:
                             if video_writer is None:
+                                video_path = f'Videos/hammer_ep{ep:03d}.mp4'
+                                print(f"[DEBUG] Creating video writer: {video_path}")
                                 video_writer = cv2.VideoWriter(
-                                    f'Videos/hammer_ep{ep:03d}.mp4', 
+                                    video_path, 
                                     cv2.VideoWriter_fourcc(*'mp4v'), 
                                     30, 
                                     (640, 480)
                                 )
                             video_writer.write(frame)
+                            print(f"[DEBUG] Wrote frame {t} to video")
                     o = self.get_obs()
                     if not policy.freeze_base:
                         current_hand_state = o[:30]
@@ -4649,7 +4658,20 @@ class GymEnv(object):
             print("(CIMER) Success rate = %f" % (len(success_list_sim) / num_episodes))
         elif task == 'hammer':
             success_list_sim = []
+            episode_data = []
             for ep in tqdm(range(num_episodes)):
+                video_writer = None
+                record_video = True
+                if record_video:
+                    video_path = f'Videos/hammer_ep{ep:03d}.mp4'
+                    print(f"[DEBUG] Creating video writer: {video_path}")
+                    video_writer = cv2.VideoWriter(
+                        video_path, 
+                        cv2.VideoWriter_fourcc(*'mp4v'), 
+                        30, 
+                        (640, 480)
+                    )
+                    print(f"DEBUG: Video writer created: {video_writer.isOpened()} path: {video_path}")
                 init_hand_state = Eval_data[ep]['handpos']
                 init_objpos = Eval_data[ep]['objpos']
                 init_objori = Eval_data[ep]['objorient']
@@ -4704,7 +4726,21 @@ class GymEnv(object):
                 if visual:
                     print("Episode %d, CIEMR policy." %(ep + 1))
                 while t < task_horizon - 1:  # what would be early-termination for hammer task?
-                    self.render() if visual is True else None  
+                    if visual or record_video or save_frames:
+                        self.render() if visual else None
+                        print(f"[DEBUG] Attempting to render frame {t}")
+                        frame = self.env.sim.render(640, 480, camera_name=camera_name)
+                        print(f"[DEBUG] Frame shape: {frame.shape}")
+                        frame = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
+                        
+                        if save_frames:
+                            frame_path = f'Frames/hammer_ep{ep:03d}_frame{t:04d}.png'
+                            cv2.imwrite(frame_path, frame)
+                            print(f"[DEBUG] Saved frame: {frame_path}")
+                        
+                        if record_video and video_writer is not None:
+                            video_writer.write(frame)
+                            print(f"[DEBUG] Wrote frame {t} to video")
                     o = self.get_obs()
                     if not policy.freeze_base:
                         current_hand_state = self.get_env_state()['qpos'][:num_hand]
@@ -4717,6 +4753,15 @@ class GymEnv(object):
                     nail_goal = o[46:49]
                     hand_OriState = current_hand_state
                     obj_OriState = np.append(current_objpos, np.append(current_objori, np.append(current_objvel, nail_goal))) 
+                    frame_data = {
+                        'hand_state': hand_OriState.copy(),
+                        'object_pos': current_objpos.copy(),
+                        'object_vel': current_objvel.copy(),
+                        'object_ori': current_objori.copy(),
+                        'nail_goal': nail_goal.copy(),
+                        'timestep': t
+                    }
+                    episode_data.append(frame_data)
                     if history_state >= 0: # we add the history information into policy inputs
                         if obj_dynamics:  # if we use the object dynamics as part of policy input
                             policy_input = np.zeros((num_future_s + history_state + 1) * (num_hand + num_obj) + (history_state + 1) * num_hand)
@@ -4817,6 +4862,22 @@ class GymEnv(object):
                             next_o, r, done, goal_achieved = self.step(torque_action)  
                     t += 1   
                     dist = np.linalg.norm(next_o[42:45] - next_o[46:49])
+                if len(episode_data) > 0:
+                    flow_data = np.array([
+                        np.concatenate([
+                            frame['hand_state'],
+                            frame['object_pos'],
+                            frame['object_vel'],
+                            frame['object_ori'],
+                            frame['nail_goal']
+                        ]) for frame in episode_data
+                    ])
+                    os.makedirs('FlowData', exist_ok=True)
+                    np.save(f'FlowData/hammer_ep{ep:03d}_flow.npy', flow_data)
+                    print(f"Saved flow data: shape {flow_data.shape}")
+                if video_writer is not None:
+                    video_writer.release()
+                    print(f"[DEBUG] Released video writer for episode {ep}")
                 if dist < 0.01:
                     success_list_sim.append(1)
             print("(CIMER) Success rate = %f" % (len(success_list_sim) / num_episodes))

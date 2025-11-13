@@ -123,9 +123,11 @@ if args.visualize == "True":
 Save_fig = False
 if args.save_fig == "True":
     Save_fig = True
-Only_record_video = False
+Only_record_video = True
 if args.only_record_video == "True":
     Only_record_video = True
+record_video = args.record_video == "True"
+save_frames = args.save_frames == "True"
 assert any([job_data['algorithm'] == a for a in ['NPG', 'TRPO', 'PPO']])  # start from natural policy gradient for training
 assert os.path.exists(os.getcwd() + job_data['matrix_file'] + job_data['env'].split('-')[0] + '/koopmanMatrix.npy')  # loading KODex reference dynamics
 KODex = np.load(os.getcwd() + job_data['matrix_file'] + job_data['env'].split('-')[0] + '/koopmanMatrix.npy')
@@ -638,6 +640,7 @@ if not Only_record_video:
             #     plt.close()
 else:  # Only_record_video
     if task_id == 'relocate':
-        e.Visualze_CIMER_policy(Eval_data, Simple_PID, coeffcients, Koopman_obser, KODex, task_horizon, job_data['future_s'], job_data['history_s'], policy, num_episodes=len(demos), gamma = gamma, obj_dynamics = job_data['obj_dynamics'], visual = visualize, object_name = job_data['object'])  # noise-free actions
+        e.Visualze_CIMER_policy(Eval_data, Simple_PID, coeffcients, Koopman_obser, KODex, task_horizon, job_data['future_s'], job_data['history_s'], policy, num_episodes=len(demos), gamma = gamma, obj_dynamics = job_data['obj_dynamics'], visual = visualize, object_name = job_data['object'], record_video=record_video, save_frames=save_frames, camera_name=args.camera_name)
     else:
-        e.Visualze_CIMER_policy(Eval_data, Simple_PID, coeffcients, Koopman_obser, KODex, task_horizon, job_data['future_s'], job_data['history_s'], policy, num_episodes=len(demos), gamma = gamma, obj_dynamics = job_data['obj_dynamics'], visual = visualize, record_video=args.record_video=='True', save_frames=args.save_frames=='True', camera_name=args.camera_name)  # noise-free actions        
+        print("executing visualze cimer")
+        e.Visualze_CIMER_policy(Eval_data, Simple_PID, coeffcients, Koopman_obser, KODex, task_horizon, job_data['future_s'], job_data['history_s'], policy, num_episodes=len(demos), gamma = gamma, obj_dynamics = job_data['obj_dynamics'], visual = visualize, record_video=record_video, save_frames=save_frames, camera_name=args.camera_name)     
