@@ -3,6 +3,7 @@ Wrapper around a gym env that provides convenience functions
 """
 
 import cv2
+from PIL import Image
 import gym
 from mjrl.policies.ncp_network import NCPNetwork
 from mjrl.policies.rnn_network import RNNNetwork
@@ -4118,11 +4119,20 @@ class GymEnv(object):
                         record_video=True,
                         save_frames=True,
                     camera_name='vil_camera'):
+        def dummy_render():
+            pass
+        self.render = dummy_render
+        if hasattr(self.env, 'render'):
+            self.env.render = dummy_render
+        if hasattr(self.env, 'env') and hasattr(self.env.env, 'render'):
+            self.env.env.render = dummy_render
+        if hasattr(self.env, 'env') and hasattr(self.env.env, 'mj_render'):
+            self.env.env.mj_render = lambda: (None, None)
         self.set_seed(seed)
         print(f"[DEBUG START] record_video={record_video}, save_frames={save_frames}, visual={visual}")
         task = self.env_id.split('-')[0]
         num_future_s = len(future_state)
-        save_path = os.path.join(os.getcwd(), 'Videos', task, object_name)[:-1] + '_CIMER.mp4'
+        #save_path = os.path.join(os.getcwd(), 'Videos', task, object_name)[:-1] + '_CIMER.mp4'
         # save_traj = 50  # used for the default object on each task
         save_traj = 20  # used for the new objects on the relocation task
         video_writer = None
@@ -4207,9 +4217,9 @@ class GymEnv(object):
                         frame = self.env.sim.render(640, 480, camera_name=camera_name)
                         print(f"[DEBUG] Frame shape: {frame.shape}")
                         frame = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
-                        
+                        frame = cv2.flip(frame, 0)
                         if save_frames:
-                            frame_path = f'Frames/hammer_ep{ep:03d}_frame{t:04d}.png'
+                            frame_path = f'Frames/episode_{ep:03d}/hammer_ep{ep:03d}_frame{t:04d}.png'
                             cv2.imwrite(frame_path, frame)
                             print(f"[DEBUG] Saved frame: {frame_path}")
                         
@@ -4658,25 +4668,42 @@ class GymEnv(object):
             print("(CIMER) Success rate = %f" % (len(success_list_sim) / num_episodes))
         elif task == 'hammer':
             success_list_sim = []
-            episode_data = []
             for ep in tqdm(range(num_episodes)):
+                print(f"[DEBUG] Starting episode {ep}")
+                episode_data = []
+                #if save_frames and ep == 0:
+                #    # Trigger context creation
+                #    _ = self.env.sim.render(640, 480, camera_name=camera_name)
+                #    import time
+                #    time.sleep(0.2)
                 video_writer = None
                 record_video = True
-                if record_video:
-                    video_path = f'Videos/hammer_ep{ep:03d}.mp4'
-                    print(f"[DEBUG] Creating video writer: {video_path}")
-                    video_writer = cv2.VideoWriter(
-                        video_path, 
-                        cv2.VideoWriter_fourcc(*'mp4v'), 
-                        30, 
-                        (640, 480)
-                    )
-                    print(f"DEBUG: Video writer created: {video_writer.isOpened()} path: {video_path}")
+                #if record_video:
+                #    video_path = f'Videos/hammer_ep{ep:03d}.mp4'
+                #    print(f"[DEBUG] Creating video writer: {video_path}")
+                #    video_writer = cv2.VideoWriter(
+                #        video_path, 
+                #        cv2.VideoWriter_fourcc(*'mp4v'), 
+                #        30, 
+                #        (640, 480)
+                #    )
+                #    print(f"DEBUG: Video writer created: {video_writer.isOpened()} path: {video_path}")
                 init_hand_state = Eval_data[ep]['handpos']
                 init_objpos = Eval_data[ep]['objpos']
                 init_objori = Eval_data[ep]['objorient']
                 init_objvel = Eval_data[ep]['objvel']
                 goal_nail = Eval_data[ep]['nail_goal']
+                os.makedirs('states', exist_ok=True)
+                os.makedirs('init_obs', exist_ok=True)
+                #os.makedirs(f'Frames/ep{ep:03d}', exist_ok=True)
+                initial_position = np.concatenate([init_hand_state, init_objpos])
+                np.save(f'init_obs/hammer_ep{ep:03d}_init_pos.npy', initial_position)
+                np.save(f'init_obs/hammer_ep{ep:03d}_init_orn.npy', init_objori)
+                
+                # Initialize trajectory lists
+                actions_list = []
+                target_qpos_list = []
+                target_qvel_list = []
                 hand_OriState = init_hand_state
                 obj_OriState = np.append(init_objpos, np.append(init_objori, np.append(init_objvel, goal_nail)))  # ori: represented in the transformed frame
                 num_hand = len(hand_OriState)
@@ -4702,6 +4729,17 @@ class GymEnv(object):
                 self.reset()
                 self.set_env_state(Eval_data[ep]['init_states'])
                 o = self.get_obs()
+                if save_frames and ep == 0:
+                    self.env.sim.model.vis.quality.shadowsize = 0
+                    self.env.sim.model.vis.map.shadowclip = 0
+                    self.env.sim.model.vis.map.shadowscale = 0
+                #if save_frames:
+                #    try:
+                #        self.render()
+                #        import time
+                #        time.sleep(0.05)
+                #    except:
+                #        pass
                 t, done = 0, False
                 # for the default history states, set them to be initial hand states
                 prev_states = dict()
@@ -4725,23 +4763,84 @@ class GymEnv(object):
                         prev_actions[i] = hand_states_traj[0][2:26]
                 if visual:
                     print("Episode %d, CIEMR policy." %(ep + 1))
+                print(f"[DEBUG] About to enter while loop for episode {ep}")
                 while t < task_horizon - 1:  # what would be early-termination for hammer task?
-                    if visual or record_video or save_frames:
-                        self.render() if visual else None
-                        print(f"[DEBUG] Attempting to render frame {t}")
-                        frame = self.env.sim.render(640, 480, camera_name=camera_name)
-                        print(f"[DEBUG] Frame shape: {frame.shape}")
-                        frame = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
+                    #if save_frames:
+                    #    # Retry rendering if it fails
+                    #    max_retries = 3
+                    #    for attempt in range(max_retries):
+                    #        try:
+                    #            frame = self.env.sim.render(640, 480, camera_name=camera_name)
+                    #            break
+                    #        except:
+                    #            if attempt < max_retries - 1:
+                    # self.offscreen_context.render(640, 480)
+
+                    #                time.sleep(0.1)
+                    #            else:
+                    #                raise
+                    
+                    #if t == 0 and save_frames:
+                    #    self.render()
+                    #    import time
+                    #    time.sleep(0.1)
+                    
+                    print(f"[DEBUG] Frame {t}, about to capture frame")
+                    if save_frames:
+                        frame = self.env.sim.render(640, 480, camera_name='vil_camera')
+                        frame = frame[::-1, :, :]
                         
-                        if save_frames:
-                            frame_path = f'Frames/hammer_ep{ep:03d}_frame{t:04d}.png'
-                            cv2.imwrite(frame_path, frame)
-                            print(f"[DEBUG] Saved frame: {frame_path}")
-                        
-                        if record_video and video_writer is not None:
-                            video_writer.write(frame)
-                            print(f"[DEBUG] Wrote frame {t} to video")
+                        img = Image.fromarray(frame)
+                        os.makedirs(f'Frames/ep{ep:03d}', exist_ok=True)
+                        img.save(f'Frames/ep{ep:03d}/frame{t:04d}.png')
+                        print(f"[DEBUG] Saved frame {t}")
+                        #self.env.sim.model.vis.quality.shadowsize = 0
+                        #self.env.sim.model.vis.map.shadowclip = 0
+                        #self.env.sim.model.vis.map.shadowscale = 0
+                        #if hasattr(self.env, 'viewer') and self.env.viewer is not None:
+                        #    cam_id = self.env.sim.model.camera_name2id('vil_camera')
+                        #    self.env.viewer.cam.type = 1
+                        #    self.env.viewer.cam.fixedcamid = cam_id
+                        #frame = self.env.sim.render(640, 480, camera_name='vil_camera')
+                        #frame = frame[::-1, :, :]
+                        #img = Image.fromarray(frame)
+                        #os.makedirs(f'Frames/ep{ep:03d}', exist_ok=True)
+                        #img.save(f'Frames/ep{ep:03d}/frame{t:04d}.png')
+
+
+                    #    frame = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
+                    #    frame = cv2.flip(frame, 0)
+                    #    os.makedirs(f'Frames/ep{ep:03d}', exist_ok=True)
+                    #    cv2.imwrite(f'Frames/ep{ep:03d}/frame{t:04d}.png', frame)
+                    #if t == 0 and (save_frames or record_video):
+                    #    self.render()  # Initialize OpenGL context
+                    #    import time
+                    #    time.sleep(0.1)  # Let it initialize
+                    
+                    # Don't render GUI after initialization
+                    #if save_frames:
+                    #    frame = self.env.sim.render(640, 480, camera_name=camera_name)
+                    #    frame = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
+                    #    os.makedirs(f'Frames/ep{ep:03d}', exist_ok=True)
+                    #    cv2.imwrite(f'Frames/ep{ep:03d}/frame{t:04d}.png', frame)
+                    #if visual or record_video or save_frames:
+                    #    self.render() if visual else None
+                    #    print(f"[DEBUG] Attempting to render frame {t}")
+                    #    frame = self.env.sim.render(640, 480, camera_name=camera_name)
+                    #    print(f"[DEBUG] Frame shape: {frame.shape}")
+                    #    frame = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
+                    #    if save_frames:
+                    #        os.makedirs(f'Frames/ep{ep:03d}', exist_ok=True)
+                    #        frame_path = f'Frames/ep{ep:03d}/hammer_ep{ep:03d}_frame{t:04d}.png'
+                    #        cv2.imwrite(frame_path, frame)
+                    #        print(f"[DEBUG] Saved frame: {frame_path}")
+                    #    
+                    #    if record_video and video_writer is not None:
+                    #        video_writer.write(frame)
+                    #        print(f"[DEBUG] Wrote frame {t} to video")
+                    print(f"[DEBUG] Getting observation at frame {t}")
                     o = self.get_obs()
+                    print(f"[DEBUG] Got observation successfully")
                     if not policy.freeze_base:
                         current_hand_state = self.get_env_state()['qpos'][:num_hand]
                     else:
@@ -4840,7 +4939,16 @@ class GymEnv(object):
                                 a += hand_states_traj[t + 1][2:26].copy() 
                     except:
                         pass
+                    
+                    if not policy.freeze_base:
+                        actions_list.append(a.copy())
+                    else:
+                        full_action = np.append(hand_states_traj[t + 1][:2], a)
+                        actions_list.append(full_action.copy())
                     # update the history information
+                    #actions_list.append(a.copy())
+                    target_qpos_list.append(hand_states_traj[t + 1].copy())
+                    target_qvel_list.append(self.get_env_state()['qvel'][:num_hand].copy())
                     if history_state >= 0:
                         for i in range(history_state):
                             prev_actions[i] = prev_actions[i + 1]
@@ -4862,6 +4970,9 @@ class GymEnv(object):
                             next_o, r, done, goal_achieved = self.step(torque_action)  
                     t += 1   
                     dist = np.linalg.norm(next_o[42:45] - next_o[46:49])
+                np.save(f'states/hammer_ep{ep:03d}_actions.npy', np.array(actions_list))
+                np.save(f'states/hammer_ep{ep:03d}_target_qpos.npy', np.array(target_qpos_list))
+                np.save(f'states/hammer_ep{ep:03d}_target_qvel.npy', np.array(target_qvel_list))
                 if len(episode_data) > 0:
                     flow_data = np.array([
                         np.concatenate([
@@ -4875,9 +4986,9 @@ class GymEnv(object):
                     os.makedirs('FlowData', exist_ok=True)
                     np.save(f'FlowData/hammer_ep{ep:03d}_flow.npy', flow_data)
                     print(f"Saved flow data: shape {flow_data.shape}")
-                if video_writer is not None:
-                    video_writer.release()
-                    print(f"[DEBUG] Released video writer for episode {ep}")
+                #if video_writer is not None:
+                #    video_writer.release()
+                #    print(f"[DEBUG] Released video writer for episode {ep}")
                 if dist < 0.01:
                     success_list_sim.append(1)
             print("(CIMER) Success rate = %f" % (len(success_list_sim) / num_episodes))
